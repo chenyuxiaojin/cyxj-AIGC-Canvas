@@ -1,12 +1,12 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { Brush, Camera, Copy, FileText, Grid2x2, Lock, LockOpen, Maximize2, Scissors, Sparkles, Upload, ZoomIn } from "lucide-react";
+import { Brush, Camera, Copy, FileText, Grid2x2, Lock, LockOpen, Scissors, Upload, ZoomIn } from "lucide-react";
 
 import type { CanvasNodeData } from "../types";
 
-export type ImageNodeActionToolId = "copyPrompt" | "reversePrompt" | "replace" | "resize" | "maskEdit" | "crop" | "split" | "upscale" | "superResolve" | "angle" | "view";
-export type ImageQuickToolId = "info" | "delete" | "saveAsset" | "download" | "edit" | ImageNodeActionToolId;
+export type ImageNodeActionToolId = "copyPrompt" | "reversePrompt" | "replace" | "resize" | "maskEdit" | "crop" | "split" | "upscale" | "angle";
+export type ImageQuickToolId = "info" | "saveAsset" | "download" | "edit" | ImageNodeActionToolId;
 
 export type ImageToolHandlers = {
     onUpload: (node: CanvasNodeData) => void;
@@ -15,9 +15,7 @@ export type ImageToolHandlers = {
     onCrop: (node: CanvasNodeData) => void;
     onSplit: (node: CanvasNodeData) => void;
     onUpscale: (node: CanvasNodeData) => void;
-    onSuperResolve: (node: CanvasNodeData) => void;
     onAngle: (node: CanvasNodeData) => void;
-    onViewImage: (node: CanvasNodeData) => void;
     onCopyPrompt: (node: CanvasNodeData) => void;
     onReversePrompt: (node: CanvasNodeData) => void;
 };
@@ -41,7 +39,7 @@ export type ImageQuickToolsConfig = {
 export const IMAGE_QUICK_TOOLS_STORAGE_KEY = "canvas-image-quick-tools-v6";
 export const PANORAMA_QUICK_TOOLS_STORAGE_KEY = "canvas-panorama-quick-tools-v1";
 
-const defaultBaseToolIds: ImageQuickToolId[] = ["info", "delete", "saveAsset", "download"];
+const defaultBaseToolIds: ImageQuickToolId[] = ["info", "saveAsset", "download"];
 
 export const imageToolDefinitions: ImageToolDefinition[] = [
     {
@@ -118,15 +116,6 @@ export const imageToolDefinitions: ImageToolDefinition[] = [
         run: (node, handlers) => handlers.onUpscale(node),
     },
     {
-        id: "superResolve",
-        defaultVisible: false,
-        panelLabel: "超分",
-        label: "超分",
-        title: "AI 超分",
-        icon: () => <Sparkles className="size-4" />,
-        run: (node, handlers) => handlers.onSuperResolve(node),
-    },
-    {
         id: "angle",
         defaultVisible: false,
         panelLabel: "多角度",
@@ -134,15 +123,6 @@ export const imageToolDefinitions: ImageToolDefinition[] = [
         title: "生成角度",
         icon: () => <Camera className="size-4" />,
         run: (node, handlers) => handlers.onAngle(node),
-    },
-    {
-        id: "view",
-        defaultVisible: false,
-        panelLabel: "查看大图",
-        label: "查看大图",
-        title: "查看图片详情",
-        icon: () => <Maximize2 className="size-4" />,
-        run: (node, handlers) => handlers.onViewImage(node),
     },
 ];
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Bot, CheckCircle2, FlaskConical, History, LoaderCircle, RotateCcw, ShieldAlert } from "lucide-react";
 import { Button, Popover, Tooltip } from "antd";
 
@@ -25,6 +25,16 @@ const statusLabels = {
 
 export function CanvasCollaborationStatus({ collaboration, nodes, onUndoLatest, onRunDemo }: CanvasCollaborationStatusProps) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    const state = collaboration.status.state;
+    const updatedAt = collaboration.status.updatedAt;
+    const [dismissed, setDismissed] = useState(false);
+    useEffect(() => {
+        setDismissed(false);
+        if (state !== "success") return;
+        const timer = window.setTimeout(() => setDismissed(true), 8000);
+        return () => window.clearTimeout(timer);
+    }, [state, updatedAt]);
+    if (state === "idle" || dismissed) return null;
     const StatusIcon =
         collaboration.status.state === "running" ? LoaderCircle : collaboration.status.state === "success" ? CheckCircle2 : collaboration.status.state === "error" ? AlertTriangle : collaboration.status.state === "conflict" ? ShieldAlert : Bot;
 
@@ -36,7 +46,7 @@ export function CanvasCollaborationStatus({ collaboration, nodes, onUndoLatest, 
                 <button
                     type="button"
                     className="flex h-9 max-w-[min(460px,55vw)] items-center gap-2 rounded-lg px-3 text-xs font-medium transition-colors"
-                    style={{ color: theme.node.text, background: collaboration.status.state === "idle" ? "transparent" : theme.toolbar.panel }}
+                    style={{ color: theme.node.text, background: theme.toolbar.panel }}
                     aria-label={`${statusLabels[collaboration.status.state]}，画布 revision ${collaboration.revision}，查看 Agent 变更历史`}
                     title={collaboration.status.message}
                 >

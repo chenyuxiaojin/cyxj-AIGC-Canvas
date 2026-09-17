@@ -3,8 +3,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import dynamic from "next/dynamic";
-import { CheckCircle2, ChevronRight, Copy, Image as ImageIcon, LockKeyhole, LockKeyholeOpen, Maximize2, Music2, Pause, Play, RefreshCw, Scissors, Settings2, Sparkles, Star, Video, X } from "lucide-react";
-import { message } from "antd";
+import { CheckCircle2, ChevronRight, Image as ImageIcon, LockKeyhole, LockKeyholeOpen, Music2, Pause, Play, RefreshCw, Scissors, Settings2, Sparkles, Star, Video } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { approvePaidGeneration, rejectPaidGeneration } from "@/services/desktop-runtime";
@@ -31,7 +30,6 @@ type CanvasNodeProps = {
     isConnectionTarget: boolean;
     isConnecting: boolean;
     referenceSelectionState?: "target" | "disabled" | "available";
-    editRequestNonce?: number;
     showPanel: boolean;
     showImageInfo: boolean;
     isLocked?: boolean;
@@ -64,7 +62,6 @@ type CanvasNodeProps = {
     onToggleBatch?: (nodeId: string) => void;
     onSetBatchPrimary?: (node: CanvasNodeData) => void;
     onRetry?: (node: CanvasNodeData) => void;
-    onGenerateImage?: (node: CanvasNodeData) => void;
     onViewImage?: (node: CanvasNodeData) => void;
     onSelectReference?: (nodeId: string) => void;
     onContextMenu: (event: React.MouseEvent, nodeId: string) => void;
@@ -89,7 +86,6 @@ type NodeContentRendererProps = {
     onStopEditing: () => void;
     mentionReferences: CanvasResourceReference[];
     onRetry?: (node: CanvasNodeData) => void;
-    onGenerateImage?: (node: CanvasNodeData) => void;
     onViewImage?: (node: CanvasNodeData) => void;
     onToggleBatch?: () => void;
     onSetBatchPrimary?: () => void;
@@ -105,7 +101,6 @@ export const CanvasNode = React.memo(function CanvasNode({
     isConnectionTarget,
     isConnecting,
     referenceSelectionState,
-    editRequestNonce = 0,
     showPanel,
     showImageInfo,
     mentionReferences = EMPTY_MENTION_REFERENCES,
@@ -138,7 +133,6 @@ export const CanvasNode = React.memo(function CanvasNode({
     onToggleBatch,
     onSetBatchPrimary,
     onRetry,
-    onGenerateImage,
     onViewImage,
     onSelectReference,
     onContextMenu,
@@ -215,11 +209,6 @@ export const CanvasNode = React.memo(function CanvasNode({
         textarea?.focus();
         textarea?.setSelectionRange(textarea.value.length, textarea.value.length);
     }, [isEditingContent]);
-
-    useEffect(() => {
-        if (!editRequestNonce || data.type !== CanvasNodeType.Text) return;
-        setIsEditingContent(true);
-    }, [data.type, editRequestNonce]);
 
     useEffect(() => {
         if (!isEditingContent) return;
@@ -476,7 +465,6 @@ export const CanvasNode = React.memo(function CanvasNode({
                                 onContentCommit?.(data.id);
                             }}
                             onRetry={onRetry}
-                            onGenerateImage={onGenerateImage}
                             onViewImage={onViewImage}
                             onToggleBatch={() => onToggleBatch?.(data.id)}
                             onSetBatchPrimary={() => onSetBatchPrimary?.(data)}
@@ -644,28 +632,12 @@ function UnknownNodeContent({ theme }: Pick<NodeContentRendererProps, "theme">) 
     );
 }
 
-function TextContent({ node, theme, isEditingContent, textareaRef, mentionReferences, onContentChange, onStopEditing, onGenerateImage }: NodeContentRendererProps) {
+function TextContent({ node, theme, isEditingContent, textareaRef, mentionReferences, onContentChange, onStopEditing }: NodeContentRendererProps) {
     const fontSize = node.metadata?.fontSize || 14;
     const textStyle = { fontSize: `${fontSize}px`, lineHeight: `${Math.round(fontSize * 1.65)}px`, color: theme.node.text, boxSizing: "border-box" } as React.CSSProperties;
 
     return (
         <div className="flex h-full w-full flex-col overflow-hidden pt-8">
-            <button
-                type="button"
-                className="absolute right-3 top-3 z-20 inline-flex h-8 items-center gap-1 rounded-full border px-2.5 text-xs font-medium opacity-85 backdrop-blur-md transition hover:scale-[1.02] hover:opacity-100"
-                style={{ background: `${theme.toolbar.panel}dd`, borderColor: theme.node.stroke, color: theme.node.text }}
-                onClick={(event) => {
-                    event.stopPropagation();
-                    onGenerateImage?.(node);
-                }}
-                onMouseDown={(event) => event.stopPropagation()}
-                onPointerDown={(event) => event.stopPropagation()}
-                title="用文本生图"
-                aria-label="用文本生图"
-            >
-                <ImageIcon className="size-3.5" />
-                生图
-            </button>
             {isEditingContent ? (
                 <CanvasResourceMentionTextarea
                     ref={textareaRef}
@@ -767,19 +739,17 @@ function EmptyImageContent({ node, theme, isBatchRoot, batchCount, batchExpanded
 
 let activeCanvasVideo: HTMLVideoElement | null = null;
 
-function VideoNodeContent({ node, theme, isSelected, mediaLite, onViewImage, onMetadataChange, onRetry }: NodeContentRendererProps) {
+function VideoNodeContent({ node, theme, isSelected, mediaLite }: NodeContentRendererProps) {
     const source = useCanvasImageSource(node.metadata, !mediaLite, false, false);
     const videoRef = useRef<HTMLVideoElement>(null);
     const [isPlaying, setIsPlaying] = useState(false);
     const [mediaDurationMs, setMediaDurationMs] = useState(0);
     const [approvalBusy, setApprovalBusy] = useState<"approve" | "reject" | null>(null);
     const [approvalError, setApprovalError] = useState<string | null>(null);
-    const [isFlipped, setIsFlipped] = useState(false);
 
     const effectiveDurationMs = mediaDurationMs || node.metadata?.durationMs || 6000;
     const trimInMs = node.metadata?.trimInMs ?? 0;
     const trimOutMs = node.metadata?.trimOutMs ?? effectiveDurationMs;
-    const reviewStatus = node.metadata?.reviewStatus ?? "pending";
 
     useEffect(() => {
         const video = videoRef.current;
@@ -888,97 +858,6 @@ function VideoNodeContent({ node, theme, isSelected, mediaLite, onViewImage, onM
         if (isSelected) videoRef.current?.focus({ preventScroll: true });
     };
 
-    const cycleReviewStatus = (event: React.MouseEvent) => {
-        event.stopPropagation();
-        const statuses: Array<"approved" | "pending" | "rejected" | "post_composite"> = ["pending", "approved", "rejected", "post_composite"];
-        const currentIndex = statuses.indexOf(reviewStatus as any);
-        const nextStatus = statuses[(currentIndex + 1) % statuses.length];
-        onMetadataChange?.(node.id, { reviewStatus: nextStatus });
-        const labels: Record<string, string> = { approved: "已拍板 ✅", pending: "待审片 🟡", rejected: "标记废片 🔴", post_composite: "达芬奇后期 🟣" };
-        message.info(`镜头已切换为：${labels[nextStatus] || nextStatus}`);
-    };
-
-    // 格式化秒数
-    const trimSec = ((trimOutMs - trimInMs) / 1000).toFixed(1);
-    const totalSec = (effectiveDurationMs / 1000).toFixed(1);
-    const inSec = (trimInMs / 1000).toFixed(1);
-    const outSec = (trimOutMs / 1000).toFixed(1);
-
-    if (isFlipped) {
-        // 背面：工程态
-        return (
-            <div className="flex h-full w-full flex-col justify-between overflow-y-auto p-3 text-left thin-scrollbar bg-[#141519] rounded-[18px] text-stone-200" data-canvas-no-zoom>
-                <div className="space-y-2">
-                    <div className="flex items-center justify-between border-b border-white/10 pb-1.5">
-                        <span className="text-xs font-bold text-emerald-400">📝 工程参数与 Prompt</span>
-                        <button
-                            type="button"
-                            onClick={(e) => {
-                                e.stopPropagation();
-                                setIsFlipped(false);
-                            }}
-                            className="flex items-center gap-1 text-[11px] text-stone-400 hover:text-white"
-                        >
-                            <X className="size-3.5" />
-                            <span>返回视频</span>
-                        </button>
-                    </div>
-
-                    <div className="space-y-1.5 text-xs">
-                        <div>
-                            <span className="text-[10px] text-stone-400 block font-medium">VISUAL PROMPT</span>
-                            <div className="rounded-lg bg-black/40 p-2 text-[11px] leading-relaxed select-text max-h-24 overflow-y-auto thin-scrollbar">
-                                {node.metadata?.prompt || "无视觉提示词"}
-                            </div>
-                        </div>
-
-                        {node.metadata?.negativePrompt ? (
-                            <div>
-                                <span className="text-[10px] text-stone-400 block font-medium">NEGATIVE PROMPT</span>
-                                <div className="rounded-lg bg-black/40 p-1.5 text-[10px] text-stone-400 select-text">
-                                    {node.metadata?.negativePrompt}
-                                </div>
-                            </div>
-                        ) : null}
-
-                        <div className="grid grid-cols-2 gap-2 text-[10px] text-stone-400 pt-1">
-                            <div>模型: <b className="text-stone-200 font-mono">{node.metadata?.model || "默认视频模型"}</b></div>
-                            <div>单镜成本: <b className="text-emerald-400 font-mono">{typeof node.metadata?.estimatedCostYuan === "number" ? `¥${node.metadata?.estimatedCostYuan.toFixed(2)}` : "¥0.54"}</b></div>
-                        </div>
-                    </div>
-                </div>
-
-                <div className="flex items-center justify-between border-t border-white/10 pt-2 text-[11px]">
-                    <button
-                        type="button"
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            navigator.clipboard.writeText(node.metadata?.prompt || "");
-                            message.success("已复制 Prompt 到剪贴板");
-                        }}
-                        className="flex items-center gap-1 text-stone-300 hover:text-white"
-                    >
-                        <Copy className="size-3" />
-                        <span>复制 Prompt</span>
-                    </button>
-
-                    <button
-                        type="button"
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            onRetry?.(node);
-                        }}
-                        className="flex items-center gap-1 text-amber-400 hover:underline"
-                    >
-                        <RefreshCw className="size-3" />
-                        <span>重跑此镜</span>
-                    </button>
-                </div>
-            </div>
-        );
-    }
-
-    // 正面：审片态
     return (
         <div className="relative h-full w-full overflow-hidden rounded-[18px] bg-black" data-canvas-no-zoom>
             <video
@@ -1003,9 +882,6 @@ function VideoNodeContent({ node, theme, isSelected, mediaLite, onViewImage, onM
             {mediaDurationMs > 0 ? <span className="pointer-events-none absolute left-2 top-2 z-20 flex h-7 items-center justify-center rounded-md px-2 text-[11px] font-medium opacity-70 backdrop-blur" style={controlStyle}>{new Date(mediaDurationMs).toISOString().slice(mediaDurationMs >= 3_600_000 ? 11 : 14, 19)}</span> : null}
             <button type="button" title={isPlaying ? "暂停" : "播放"} aria-label={isPlaying ? "暂停" : "播放"} className={`${controlClassName} left-2`} style={controlStyle} onClick={(event) => { event.stopPropagation(); togglePlayback(); }} onMouseDown={keepVideoFocus} onDoubleClick={(event) => event.stopPropagation()}>
                 {isPlaying ? <Pause className="size-3.5" /> : <Play className="size-3.5" />}
-            </button>
-            <button type="button" title="放大预览" aria-label="放大预览" className={`${controlClassName} right-2`} style={controlStyle} onClick={(event) => { event.stopPropagation(); videoRef.current?.pause(); onViewImage?.(node); }} onMouseDown={keepVideoFocus} onDoubleClick={(event) => event.stopPropagation()}>
-                <Maximize2 className="size-3.5" />
             </button>
         </div>
     );

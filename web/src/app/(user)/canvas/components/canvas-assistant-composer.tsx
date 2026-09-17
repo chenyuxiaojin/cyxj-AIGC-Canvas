@@ -1,8 +1,8 @@
 "use client";
 
 import { useMemo } from "react";
-import { ArrowUp, FolderOpen, ImageIcon, Menu, Square, Upload, Video } from "lucide-react";
-import { Button, Dropdown } from "antd";
+import { ArrowUp, ImageIcon, Square, Video } from "lucide-react";
+import { Button } from "antd";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useEffectiveConfig } from "@/stores/use-config-store";
@@ -25,8 +25,6 @@ export type CanvasAssistantComposerProps = {
     onReferenceIdsChange: (ids: string[]) => void;
     onSubmit: (prompt?: string, referenceIds?: string[]) => void | Promise<void>;
     onStop?: () => void;
-    onOpenUpload: () => void;
-    onOpenAssets: () => void;
     onPasteImage: (file: File) => void;
 };
 
@@ -42,8 +40,6 @@ export function CanvasAssistantComposer({
     onReferenceIdsChange,
     onSubmit,
     onStop,
-    onOpenUpload,
-    onOpenAssets,
     onPasteImage,
 }: CanvasAssistantComposerProps) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
@@ -78,18 +74,6 @@ export function CanvasAssistantComposer({
                 />
                 <div className="mt-2 flex items-center justify-between gap-2">
                     <div className="flex min-w-0 flex-1 items-center gap-1">
-                        <Dropdown
-                            trigger={["click"]}
-                            menu={{
-                                items: [
-                                    { key: "upload", icon: <Upload className="size-4" />, label: "上传文件" },
-                                    { key: "assets", icon: <FolderOpen className="size-4" />, label: "我的素材" },
-                                ],
-                                onClick: ({ key }) => (key === "upload" ? onOpenUpload() : onOpenAssets()),
-                            }}
-                        >
-                            <Button type="text" shape="circle" className="!h-8 !w-8 !min-w-8" style={{ color: theme.node.text }} icon={<Menu className="size-4" />} aria-label="添加素材" />
-                        </Dropdown>
                         <CanvasImageSettingsPopover
                             config={imageConfig}
                             placement="topLeft"

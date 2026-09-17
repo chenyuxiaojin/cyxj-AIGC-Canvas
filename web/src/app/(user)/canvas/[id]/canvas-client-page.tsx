@@ -1,7 +1,7 @@
 "use client";
 import { CANVAS_OPERATION_PROTOCOL_VERSION, buildCanvasStructureOperations, canonicalizeStoredNode, type CanvasOperation, type CanvasOperationOutcome, type CanvasOperationState } from "../protocol/canvas-operation-protocol";
 import type { CanvasProject } from "../stores/use-canvas-store";
-import { selectLocalMedia, importLocalMediaPaths, getProjectMediaDirectory, selectProjectMediaDirectory, relinkLocalMediaReference, resolveLocalMediaReference, type LocalMediaRequestEvidence, type LocalMediaImportOutcome, type LocalMediaResolution, type DesktopTaskSnapshot } from "@/services/desktop-runtime";
+import { selectLocalMedia, importLocalMediaPaths, getProjectMediaDirectory, selectProjectMediaDirectory, relinkLocalMediaReference, resolveLocalMediaReference, type LocalMediaImportOutcome, type LocalMediaResolution, type DesktopTaskSnapshot } from "@/services/desktop-runtime";
 
 import { seedanceDurationOptionsForModel, seedanceMaxDuration } from "@/lib/seedance-video";
 import equal from "fast-deep-equal";
@@ -9,13 +9,13 @@ import { executeDirectorCommand } from "@/services/canvas-director-commands";
 
 import { createCanvasDragIndex } from "../utils/canvas-drag-index";
 import { CanvasVersionHistory } from "../components/canvas-version-history";
-import { CanvasSaveStatus } from "../components/canvas-save-status";
+import { CanvasSaveIndicator, CanvasSaveIssues } from "../components/canvas-save-status";
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import dynamic from "next/dynamic";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { ChevronLeft, ChevronRight, Download, Globe2, Home, ImageIcon, Images, Layers3, List, Maximize, Menu, Bot, Music2, PanelLeftClose, PanelLeftOpen, Pause, Play, Plus, Redo2, Settings2, Trash2, Undo2, Upload, Video, Volume2, VolumeX, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, LayoutGrid, Maximize, Bot, PanelLeftOpen, Pause, Play, Volume2, VolumeX, X } from "lucide-react";
 import { saveAs } from "file-saver";
 
 import { deleteCanvasProjects, deleteCanvasTasks } from "@/services/api/canvas-tasks";
@@ -33,7 +33,6 @@ import { cancelDesktopTask, fetchDesktopTaskStatus, generateCanvasTestClip, isDe
 import { nanoid } from "nanoid";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
-import { UserStatusActions } from "@/components/layout/user-status-actions";
 import { isKIEKlingV3Config, kieKlingOmniVariant } from "@/components/video-settings-panel";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -44,7 +43,7 @@ import { PANORAMA_IMAGE_SIZE, PANORAMA_NODE_SIZE, buildPanoramaPrompt, isCanvasI
 import { applyCameraPrompt } from "../utils/canvas-camera";
 import { desktopTaskIdFromStorageKey, materializeDesktopTaskMetadata, resolveDesktopTaskMedia } from "../utils/canvas-local-task";
 import { GROUP_PADDING, findContainingGroupId, findGroupDropTarget, getNodeBounds, snapNodesIntoGroup } from "../utils/canvas-group";
-import { App, Button, Dropdown, Modal } from "antd";
+import { App, Button, Modal } from "antd";
 import { isCogVideoX3Model, modelKey, supportsVideoAudioGeneration, supportsVideoFrameReferences } from "@/lib/video-model-capabilities";
 import { isMimoVoiceCloneModel } from "@/lib/mimo-tts";
 import { isGlmTtsModel } from "@/lib/audio-generation";
@@ -72,12 +71,11 @@ import { CanvasNode } from "../components/canvas-node";
 import { CanvasNodePromptPanel, type CanvasNodeGenerationMode, type CanvasVideoFrameOption } from "../components/canvas-node-prompt-panel";
 import type { CanvasVideoResourceOption } from "../components/canvas-video-settings-popover";
 import { CanvasToolbar } from "../components/canvas-toolbar";
-import { AssetPickerModal } from "../components/asset-picker-modal";
+import { CanvasNodeCreateMenu } from "../components/canvas-node-create-menu";
 import { CanvasZoomControls } from "../components/canvas-zoom-controls";
 import { CANVAS_ASSET_DRAG_TYPE, CanvasSidePanel } from "../components/canvas-side-panel";
 import { DEFAULT_CANVAS_AGENT_PANEL, DEFAULT_CANVAS_SIDE_PANEL, useCanvasStore, acceptDesktopCanvasDocument } from "../stores/use-canvas-store";
 import { listCanvasCommandHistory, registerCanvasExecutor, readCanvasTransfer, writeCanvasTransfer, readCanvasDocument, submitCanvasCommand, getCanvasCommand, approveCanvasCommand, applyDesktopCanvasOperations, type CanvasCommand, type CanvasDocument, type CanvasExecutor } from "@/services/canvas-commands";
-import { CanvasCommandPermissions } from "../components/canvas-command-permissions";
 import { CanvasSequentialPlayer } from "../components/canvas-sequential-player";
 import { createCanvasArchive } from "../utils/canvas-export";
 import { importCanvasArchive } from "../utils/canvas-import";
@@ -269,118 +267,13 @@ function CanvasRefreshShell() {
     );
 }
 
-function ConnectionCreateMenu({ pending, onCreate, onClose }: { pending: PendingConnectionCreate; onCreate: (type: CanvasNodeType) => void; onClose: () => void }) {
-    const theme = canvasThemes[useThemeStore((state) => state.theme)];
-    return (
-        <div
-            className="absolute z-[120] w-[300px] rounded-[18px] border p-3 shadow-2xl backdrop-blur"
-            data-connection-create-menu
-            style={{ left: pending.position.x, top: pending.position.y, background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text }}
-            onMouseDown={(event) => event.stopPropagation()}
-            onPointerDown={(event) => event.stopPropagation()}
-        >
-            <div className="mb-2 flex items-center justify-between px-1">
-                <span className="text-sm font-medium" style={{ color: theme.node.muted }}>
-                    引用该节点生成
-                </span>
-                <button type="button" className="grid size-7 place-items-center rounded-lg text-base opacity-55 transition hover:bg-white/10 hover:opacity-100" onClick={onClose} aria-label="关闭">
-                    ×
-                </button>
-            </div>
-            <div className="grid gap-1">
-                <ConnectionCreateOption theme={theme} icon={<List className="size-5" />} title="文本生成" description="脚本、广告词、品牌文案" onClick={() => onCreate(CanvasNodeType.Text)} />
-                <ConnectionCreateOption theme={theme} icon={<ImageIcon className="size-5" />} title="图片生成" onClick={() => onCreate(CanvasNodeType.Image)} />
-                <ConnectionCreateOption theme={theme} icon={<Video className="size-5" />} title="视频生成" onClick={() => onCreate(CanvasNodeType.Video)} />
-                <ConnectionCreateOption theme={theme} icon={<Music2 className="size-5" />} title="音频参考" onClick={() => onCreate(CanvasNodeType.Audio)} />
-                <ConnectionCreateOption theme={theme} icon={<Globe2 className="size-5" />} title="全景图" description="文生全景、图生全景" onClick={() => onCreate(CanvasNodeType.Panorama)} />
-                <ConnectionCreateOption theme={theme} icon={<Layers3 className="size-5" />} title="3D 导演台" description="3D场景、角色、机位" onClick={() => onCreate(CanvasNodeType.Director)} />
-                <ConnectionCreateOption theme={theme} icon={<Settings2 className="size-5" />} title="配置节点" description="模型、尺寸、数量和输入顺序" onClick={() => onCreate(CanvasNodeType.Config)} />
-            </div>
-        </div>
-    );
-}
-
-function ConnectionCreateOption({ theme, icon, title, description, onClick }: { theme: (typeof canvasThemes)[keyof typeof canvasThemes]; icon: React.ReactNode; title: string; description?: string; onClick?: () => void }) {
-    return (
-        <button
-            type="button"
-            className="flex h-16 w-full cursor-pointer items-center gap-3 rounded-2xl px-3 text-left transition"
-            style={{ color: theme.node.text }}
-            onClick={onClick}
-            onMouseEnter={(event) => (event.currentTarget.style.background = theme.node.fill)}
-            onMouseLeave={(event) => (event.currentTarget.style.background = "transparent")}
-        >
-            <span className="grid size-11 shrink-0 place-items-center rounded-xl" style={{ background: theme.node.fill, color: theme.node.muted }}>
-                {icon}
-            </span>
-            <span className="min-w-0 flex-1">
-                <span className="flex items-center gap-2 text-base font-semibold leading-5">{title}</span>
-                {description ? (
-                    <span className="mt-1 block truncate text-sm" style={{ color: theme.node.muted }}>
-                        {description}
-                    </span>
-                ) : null}
-            </span>
-        </button>
-    );
-}
-
-function NodeCreateMenu({ position, onCreate, onUpload, onOpenAssetLibrary, onClose }: { position: Position; onCreate: (type: CanvasNodeType) => void; onUpload: () => void; onOpenAssetLibrary: () => void; onClose: () => void }) {
-    const theme = canvasThemes[useThemeStore((state) => state.theme)];
-    const menuRef = useRef<HTMLDivElement>(null);
-
-    useEffect(() => {
-        const handlePointerDown = (event: PointerEvent) => {
-            if (menuRef.current && !menuRef.current.contains(event.target as Node)) onClose();
-        };
-        document.addEventListener("pointerdown", handlePointerDown, true);
-        return () => document.removeEventListener("pointerdown", handlePointerDown, true);
-    }, [onClose]);
-
-    return (
-        <div
-            ref={menuRef}
-            className="absolute z-[120] w-[300px] rounded-[18px] border p-3 shadow-2xl backdrop-blur"
-            data-canvas-no-zoom
-            style={{ left: position.x, top: position.y, background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text }}
-            onPointerDown={(event) => event.stopPropagation()}
-        >
-            <div className="mb-2 flex items-center justify-between px-1">
-                <span className="text-sm font-medium" style={{ color: theme.node.muted }}>
-                    添加节点
-                </span>
-                <button type="button" className="grid size-7 place-items-center rounded-lg opacity-55 transition hover:opacity-100" onClick={onClose} aria-label="关闭">
-                    ×
-                </button>
-            </div>
-            <div className="grid gap-1">
-                <ConnectionCreateOption theme={theme} icon={<List className="size-5" />} title="文本生成" description="脚本、广告词、品牌文案" onClick={() => onCreate(CanvasNodeType.Text)} />
-                <ConnectionCreateOption theme={theme} icon={<ImageIcon className="size-5" />} title="图片生成" onClick={() => onCreate(CanvasNodeType.Image)} />
-                <ConnectionCreateOption theme={theme} icon={<Video className="size-5" />} title="视频生成" onClick={() => onCreate(CanvasNodeType.Video)} />
-                <ConnectionCreateOption theme={theme} icon={<Music2 className="size-5" />} title="音频参考" onClick={() => onCreate(CanvasNodeType.Audio)} />
-                <ConnectionCreateOption theme={theme} icon={<Globe2 className="size-5" />} title="全景图" description="文生全景、图生全景" onClick={() => onCreate(CanvasNodeType.Panorama)} />
-                <ConnectionCreateOption theme={theme} icon={<Layers3 className="size-5" />} title="3D 导演台" description="3D场景、角色、机位" onClick={() => onCreate(CanvasNodeType.Director)} />
-                <ConnectionCreateOption theme={theme} icon={<Settings2 className="size-5" />} title="配置节点" description="模型、尺寸、数量和输入顺序" onClick={() => onCreate(CanvasNodeType.Config)} />
-                <div className="mb-2 mt-3 flex items-center justify-between px-1">
-                    <span className="text-sm font-medium" style={{ color: theme.node.muted }}>
-                        添加资源
-                    </span>
-                </div>
-                <ConnectionCreateOption theme={theme} icon={<Upload className="size-5" />} title="上传" description="图片、视频或音频" onClick={onUpload} />
-                <ConnectionCreateOption theme={theme} icon={<Images className="size-5" />} title="从我的素材选择" description="文本、图片或视频" onClick={onOpenAssetLibrary} />
-            </div>
-        </div>
-    );
-}
-
 function InfiniteCanvasPage({ projectId }: { projectId: string }) {
-    const { message } = App.useApp();
+    const { message, modal } = App.useApp();
     const router = useRouter();
     const searchParams = useSearchParams();
     const collaborationDemoEnabled = searchParams.get("agent-collab-demo") === "1";
     const containerRef = useRef<HTMLDivElement>(null);
     const imageInputRef = useRef<HTMLInputElement>(null);
-    const assetInsertPositionRef = useRef<Position | null>(null);
     const draggedAssetPayloadRef = useRef<InsertAssetPayload | null>(null);
     const uploadTargetRef = useRef<{ nodeId?: string; position?: Position } | null>(null);
     const clipboardRef = useRef<CanvasClipboard | null>(null);
@@ -458,12 +351,13 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     const [nodeCreatePosition, setNodeCreatePosition] = useState<Position | null>(null);
     const [runningNodeId, setRunningNodeId] = useState<string | null>(null);
     const [isMiniMapOpen, setIsMiniMapOpen] = useState(false);
+    const [versionHistoryOpen, setVersionHistoryOpen] = useState(false);
+    const [shortcutsOpen, setShortcutsOpen] = useState(false);
+    const [assistantCollapseSignal, setAssistantCollapseSignal] = useState(0);
     const [backgroundMode, setBackgroundMode] = useState<CanvasBackgroundMode>("lines");
     const [showImageInfo, setShowImageInfo] = useState(false);
     const [sidePanel, setSidePanel] = useState(() => DEFAULT_CANVAS_SIDE_PANEL);
     const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
-    const [assetPickerOpen, setAssetPickerOpen] = useState(false);
-    const [assetPickerTab, setAssetPickerTab] = useState<string>("my-assets");
     const [localMediaImportOpen, setLocalMediaImportOpen] = useState(false);
     const [projectMediaDirectory, setProjectMediaDirectory] = useState<string | null>(null);
     // 原生拖放监听在早期 effect 里注册，处理函数在后面才定义：用 ref 桥接最新实现
@@ -475,8 +369,6 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     const [nodeImageSettingsOpen, setNodeImageSettingsOpen] = useState(false);
     const [dialogNodeId, setDialogNodeId] = useState<string | null>(null);
     const [openDirectorNodeId, setOpenDirectorNodeId] = useState<string | null>(null);
-    const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
-    const [editRequestNonce, setEditRequestNonce] = useState(0);
     const [infoNodeId, setInfoNodeId] = useState<string | null>(null);
     const [cropNodeId, setCropNodeId] = useState<string | null>(null);
     const [maskEditNodeId, setMaskEditNodeId] = useState<string | null>(null);
@@ -484,7 +376,6 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     const [maskEditChannelId, setMaskEditChannelId] = useState("");
     const [splitNodeId, setSplitNodeId] = useState<string | null>(null);
     const [upscaleNodeId, setUpscaleNodeId] = useState<string | null>(null);
-    const [superResolveNodeId, setSuperResolveNodeId] = useState<string | null>(null);
     const [angleNodeId, setAngleNodeId] = useState<string | null>(null);
     const [previewNodeId, setPreviewNodeId] = useState<string | null>(null);
     const [agentPanel, setAgentPanel] = useState(DEFAULT_CANVAS_AGENT_PANEL);
@@ -499,8 +390,6 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     const [dropTargetGroupId, setDropTargetGroupId] = useState<string | null>(null);
     const [referencePickerNodeId, setReferencePickerNodeId] = useState<string | null>(null);
     const [canvasNow, setCanvasNow] = useState(Date.now());
-    const [localMediaEvidenceOpen, setLocalMediaEvidenceOpen] = useState(false);
-    const [localMediaEvidence, setLocalMediaEvidence] = useState<LocalMediaRequestEvidence[]>([]);
     const [spotlightGroupId, setSpotlightGroupId] = useState<string | null>(null);
     const resolvedAgentConfig = useMemo<CanvasAgentConfig>(
         () =>
@@ -1187,7 +1076,6 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     const currentMaskEditChannelId = maskEditChannelId || maskEditConfig?.imageChannelId || "";
     const splitNode = splitNodeId ? nodeById.get(splitNodeId) || null : null;
     const upscaleNode = upscaleNodeId ? nodeById.get(upscaleNodeId) || null : null;
-    const superResolveNode = superResolveNodeId ? nodeById.get(superResolveNodeId) || null : null;
     const angleNode = angleNodeId ? nodeById.get(angleNodeId) || null : null;
     const contextMenuNode = contextMenu?.type === "node" ? nodeById.get(contextMenu.nodeId) || null : null;
     const previewNode = previewNodeId ? nodeById.get(previewNodeId) || null : null;
@@ -1523,7 +1411,6 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
             setHoveredNodeId((current) => (current && allIds.has(current) ? null : current));
             setToolbarNodeId((current) => (current && allIds.has(current) ? null : current));
             setDialogNodeId((current) => (current && allIds.has(current) ? null : current));
-            setEditingNodeId((current) => (current && allIds.has(current) ? null : current));
             setInfoNodeId((current) => (current && allIds.has(current) ? null : current));
             setCropNodeId((current) => (current && allIds.has(current) ? null : current));
             setMaskEditNodeId((current) => (current && allIds.has(current) ? null : current));
@@ -1559,7 +1446,6 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         setHoveredNodeId(null);
         setToolbarNodeId(null);
         setDialogNodeId(null);
-        setEditingNodeId(null);
     }, [cancelPendingConnectionCreate]);
 
     const clearCanvas = useCallback(() => {
@@ -1815,18 +1701,24 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         applyHistory(next);
     }, [applyHistory]);
 
-    const createAndOpenProject = useCallback(() => {
-        const id = createProject(`画布 ${useCanvasStore.getState().projects.length + 1}`);
-        router.push(`/canvas/${id}`);
-    }, [createProject, router]);
 
     const deleteCurrentProject = useCallback(() => {
-        void deleteCanvasProjects([projectId]).catch(() => undefined);
-        deleteCanvasTaskRecords();
-        deleteProjects([projectId]);
-        cleanupAssetImages();
-        router.push("/canvas");
-    }, [cleanupAssetImages, deleteCanvasTaskRecords, deleteProjects, projectId, router]);
+        modal.confirm({
+            title: "删除当前画布？",
+            content: "画布里的节点、连线和任务记录会一起移除。",
+            okText: "删除",
+            okButtonProps: { danger: true },
+            cancelText: "取消",
+            centered: true,
+            onOk: () => {
+                void deleteCanvasProjects([projectId]).catch(() => undefined);
+                deleteCanvasTaskRecords();
+                deleteProjects([projectId]);
+                cleanupAssetImages();
+                router.push("/");
+            },
+        });
+    }, [cleanupAssetImages, deleteCanvasTaskRecords, deleteProjects, modal, projectId, router]);
 
     const handleCanvasMouseDown = useCallback(
         (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -1835,7 +1727,6 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
             setHoveredNodeId(null);
             setToolbarNodeId(null);
             setDialogNodeId(null);
-            setEditingNodeId(null);
             if (pendingConnectionCreateRef.current) cancelPendingConnectionCreate();
             if (event.button !== 0) return;
             setAgentReferenceNodeClick((current) => ({ ...current, nodeId: null }));
@@ -2335,7 +2226,6 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 setHoveredNodeId(null);
                 setToolbarNodeId(null);
                 setDialogNodeId(null);
-                setEditingNodeId(null);
                 setInfoNodeId(null);
                 setCropNodeId(null);
                 setMaskEditNodeId(null);
@@ -2489,15 +2379,6 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         },
         [commitHumanNodeMutation],
     );
-
-    const openTextEditor = useCallback((node: CanvasNodeData) => {
-        if (node.type !== CanvasNodeType.Text) return;
-        setSelectedNodeIds(new Set([node.id]));
-        setSelectedConnectionId(null);
-        setDialogNodeId(node.id);
-        setEditingNodeId(node.id);
-        setEditRequestNonce((value) => value + 1);
-    }, []);
 
     const handleNodePromptChange = useCallback(
         (nodeId: string, prompt: string) => {
@@ -4925,7 +4806,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     const commandExecutorRef = useRef<CanvasExecutor | null>(null);
     commandExecutorRef.current = {
         projectId,
-        busy: () => Boolean(!projectLoaded || titleEditing || isNodeDragging || editingNodeId || runningNodeId || openDirectorNodeId || nodesRef.current.some((node) => node.metadata?.status === "loading")),
+        busy: () => Boolean(!projectLoaded || titleEditing || isNodeDragging || runningNodeId || openDirectorNodeId || nodesRef.current.some((node) => node.metadata?.status === "loading")),
         preview: (command) => {
             const args = command.request.arguments;
             const node = nodesRef.current.find((node) => node.id === args.nodeId);
@@ -5349,12 +5230,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
             message.error(error instanceof Error ? error.message : "首页素材插入失败");
         });
     }, [getCanvasCenter, message, projectId, projectLoaded, updateProject]);
-    const handleAssetInsert = useCallback((payload: InsertAssetPayload) => {
-        const position = assetInsertPositionRef.current || undefined;
-        assetInsertPositionRef.current = null;
-        void insertAssetAtRef.current(payload, position);
-        setAssetPickerOpen(false);
-    }, []);
+    const handleAssetInsert = useCallback((payload: InsertAssetPayload) => void insertAssetAtRef.current(payload), []);
 
     const selectOnly = useCallback((nodeId: string) => {
         const nextSelection = new Set([nodeId]);
@@ -5415,34 +5291,6 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 if (selection?.toString() && panel?.contains(selection.anchorNode) && !panel.contains(event.target as Node)) selection.removeAllRanges();
             }}
         >
-            {desktopRuntime && !localMediaEvidenceOpen ? (
-                <button
-                    type="button"
-                    className="fixed bottom-3 right-3 z-[200] rounded-lg border border-emerald-400/40 bg-slate-950/90 px-3 py-2 font-mono text-xs text-emerald-200 shadow-xl"
-                    onClick={() => setLocalMediaEvidenceOpen(true)}
-                >
-                    Range 证据
-                </button>
-            ) : null}
-            {localMediaEvidenceOpen ? (
-                <aside
-                    data-local-media-evidence
-                    className="fixed right-3 top-3 z-[200] grid max-w-[440px] gap-1 rounded-xl border border-emerald-400/50 bg-slate-950/95 px-4 py-3 font-mono text-xs text-emerald-100 shadow-2xl"
-                >
-                    <strong className="text-sm text-emerald-300">本机媒体 Range 证据</strong>
-                    <span>
-                        请求 {localMediaEvidence.length} · 206 {localMediaEvidence.filter((entry) => entry.status === 206).length} · Range {localMediaEvidence.filter((entry) => Boolean(entry.requestedRange)).length}
-                    </span>
-                    {localMediaEvidence.slice(-5).reverse().map((entry) => (
-                        <span key={`${entry.recordedAtMs}-${entry.assetId}-${entry.requestedRange || "full"}`}>
-                            {entry.method} {entry.status} {entry.responseBytes}B {entry.requestedRange || "full"} · {entry.assetId}
-                        </span>
-                    ))}
-                    <button type="button" className="justify-self-start text-emerald-300/70 underline" onClick={() => setLocalMediaEvidenceOpen(false)}>
-                        关闭（Shift+Option+R）
-                    </button>
-                </aside>
-            ) : null}
             <CanvasSidePanel
                 nodes={nodes}
                 selectedNodeIds={selectedNodeIds}
@@ -5461,38 +5309,34 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                     }, 0);
                 }}
                 onInsertAsset={handleAssetInsert}
+                onToggle={() => setSidePanel((current) => ({ ...current, open: !current.open }))}
             />
             <section className="relative min-w-0 flex-1 overflow-hidden">
                 <CanvasTopBar
                     title={currentProject?.title || "未命名画布"}
-                    sidePanelOpen={sidePanel.open}
-                    onToggleSidePanel={() => setSidePanel((current) => ({ ...current, open: !current.open }))}
+                    projectId={projectId}
                     titleDraft={titleDraft}
                     isTitleEditing={titleEditing}
                     onTitleDraftChange={setTitleDraft}
                     onStartTitleEditing={startTitleEditing}
                     onFinishTitleEditing={finishTitleEditing}
                     onCancelTitleEditing={() => setTitleEditing(false)}
-                    canUndo={historyState.canUndo}
-                    canRedo={historyState.canRedo}
                     onHome={() => router.push("/")}
-                    onProjects={() => router.push("/canvas")}
-                    onCreateProject={createAndOpenProject}
-                    onDeleteProject={deleteCurrentProject}
-                    onImportImage={() => handleUploadRequest()}
-                    onUndo={undoCanvas}
-                    onRedo={redoCanvas}
-                    assistantCollapsed={!agentPanel.open}
-                    onExpandAssistant={() => {
+                    sidePanelOpen={sidePanel.open}
+                    onOpenSidePanel={() => setSidePanel((current) => ({ ...current, open: true }))}
+                    assistantOpen={agentPanel.open}
+                    onToggleAssistant={() => {
+                        if (agentPanel.open) {
+                            setAssistantCollapseSignal((value) => value + 1);
+                            return;
+                        }
                         setAssistantMounted(true);
                         setAgentPanel((current) => ({ ...current, open: true }));
                     }}
                 />
 
-                <CanvasSaveStatus projectId={projectId}>
-                    <CanvasVersionHistory projectId={projectId} />
-                    {desktopRuntime && <CanvasCommandPermissions projectId={projectId} />}
-                </CanvasSaveStatus>
+                <CanvasSaveIssues projectId={projectId} />
+                {desktopRuntime ? <CanvasVersionHistory projectId={projectId} open={versionHistoryOpen} onClose={() => setVersionHistoryOpen(false)} /> : null}
                 <CanvasCollaborationStatus collaboration={collaboration} nodes={nodes} onUndoLatest={undoLatestCanvasAgentBatch} onRunDemo={collaborationDemoEnabled ? () => void runLocalCollaborationDemo() : undefined} />
 
                 {spotlightGroupId ? (
@@ -5563,7 +5407,6 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                             isConnectionTarget={connectionTargetNodeId === node.id}
                             isConnecting={Boolean(connectingParams)}
                             referenceSelectionState={!referencePickerNodeId ? undefined : node.id === referencePickerNodeId ? "target" : referenceConnectedNodeIds.has(node.id) || !isCanvasReferenceNode(node) ? "disabled" : "available"}
-                            editRequestNonce={editingNodeId === node.id ? editRequestNonce : 0}
                             showPanel={dialogNodeId === node.id && !selectionBox}
                             batchCount={batchChildCountById.get(node.id) || 0}
                             groupChildCount={groupChildCountById.get(node.id) || 0}
@@ -5601,7 +5444,6 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                             onToggleBatch={toggleBatchExpanded}
                             onSetBatchPrimary={setBatchPrimary}
                             onRetry={handleRetryNodeClick}
-                            onGenerateImage={generateImageFromTextNode}
                             onViewImage={handleViewImage}
                             onSelectReference={selectNodeReference}
                             onContextMenu={handleNodeContextMenu}
@@ -5632,22 +5474,16 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                             <rect width="100%" height="100%" fill={theme.canvas.selectionFill} stroke={theme.canvas.selectionStroke} strokeWidth={1.5 / viewport.k} strokeDasharray={`${10 / viewport.k} ${6 / viewport.k}`} />
                         </svg>
                     ) : null}
-                    {pendingConnectionCreate ? <ConnectionCreateMenu pending={pendingConnectionCreate} onCreate={(type) => createConnectedNode(type, pendingConnectionCreate)} onClose={cancelPendingConnectionCreate} /> : null}
+                    {pendingConnectionCreate ? <CanvasNodeCreateMenu title="引用该节点生成" position={pendingConnectionCreate.position} dataAttr="data-connection-create-menu" onCreate={(type) => createConnectedNode(type, pendingConnectionCreate)} onClose={cancelPendingConnectionCreate} /> : null}
                     {nodeCreatePosition ? (
-                        <NodeCreateMenu
+                        <CanvasNodeCreateMenu
+                            title="添加节点"
                             position={nodeCreatePosition}
+                            dataAttr="data-canvas-no-zoom"
+                            closeOnOutsideClick
                             onCreate={(type) => {
                                 createNode(type, nodeCreatePosition);
                                 setNodeCreatePosition(null);
-                            }}
-                            onUpload={() => {
-                                handleUploadRequest(undefined, nodeCreatePosition);
-                                setNodeCreatePosition(null);
-                            }}
-                            onOpenAssetLibrary={() => {
-                                assetInsertPositionRef.current = nodeCreatePosition;
-                                setNodeCreatePosition(null);
-                                setAssetPickerOpen(true);
                             }}
                             onClose={() => setNodeCreatePosition(null)}
                         />
@@ -5674,7 +5510,6 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                     onKeep={keepNodeToolbar}
                     onLeave={hideNodeToolbar}
                     onInfo={(node) => setInfoNodeId(node.id)}
-                    onEditText={openTextEditor}
                     onDecreaseFont={(node) => handleFontSizeChange(node.id, Math.max(10, (node.metadata?.fontSize || 14) - 2))}
                     onIncreaseFont={(node) => handleFontSizeChange(node.id, Math.min(32, (node.metadata?.fontSize || 14) + 2))}
                     onToggleDialog={(node) => setDialogNodeId((current) => (current === node.id ? null : node.id))}
@@ -5692,13 +5527,9 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                     onCrop={(node) => setCropNodeId(node.id)}
                     onSplit={(node) => setSplitNodeId(node.id)}
                     onUpscale={(node) => setUpscaleNodeId(node.id)}
-                    onSuperResolve={(node) => setSuperResolveNodeId(node.id)}
                     onAngle={(node) => setAngleNodeId(node.id)}
-                    onViewImage={(node) => setPreviewNodeId(node.id)}
                     onReversePrompt={createImageReversePromptNodes}
-                    onRetry={(node) => void handleRetryNode(node)}
                     onToggleFreeResize={(node) => toggleNodeFreeResize(node.id)}
-                    onDelete={(node) => deleteNodes(new Set([node.id]))}
                 />
 
                 <CanvasToolbar
@@ -5715,20 +5546,19 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                     onAddPanorama={() => createNode(CanvasNodeType.Panorama)}
                     onAddDirector={() => createNode(CanvasNodeType.Director)}
                     onAddConfig={() => createNode(CanvasNodeType.Config)}
-                    onRunLocalTask={desktopRuntime ? () => void runLocalTestClip() : undefined}
-                    onCancelLocalTask={desktopRuntime ? () => void cancelLocalTestClip() : undefined}
-                    localTaskRunning={Boolean(runningLocalTaskNode)}
+                    versionHistoryAvailable={desktopRuntime}
                     onUndo={undoCanvas}
                     onRedo={redoCanvas}
                     onUpload={() => handleUploadRequest()}
                     onDelete={() => deleteNodes(new Set(selectedNodeIds))}
                     onClear={() => setClearConfirmOpen(true)}
+                    onDeleteProject={deleteCurrentProject}
+                    onOpenVersionHistory={() => setVersionHistoryOpen(true)}
+                    onOpenShortcuts={() => setShortcutsOpen(true)}
+                    onOpenConfig={() => openConfigDialog(false)}
                     onCanvasToolChange={setCanvasTool}
                     onBackgroundModeChange={setBackgroundMode}
                     onShowImageInfoChange={setShowImageInfo}
-                    onOpenMyAssets={() => {
-                        setAssetPickerOpen(true);
-                    }}
                 />
 
                 {isMiniMapOpen ? <Minimap nodes={nodes} viewport={viewport} viewportSize={size} onViewportChange={commitViewport} /> : null}
@@ -5887,10 +5717,6 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                     <CanvasNodeUpscaleDialog dataUrl={upscaleNode.metadata.content} open={Boolean(upscaleNode)} onClose={() => setUpscaleNodeId(null)} onConfirm={(params) => void upscaleImageNode(upscaleNode!, params)} />
                 ) : null}
 
-                <Modal title="AI 超分" open={Boolean(superResolveNode?.metadata?.content)} centered footer={null} onCancel={() => setSuperResolveNodeId(null)}>
-                    <div className="py-8 text-center text-base font-medium">暂未实现</div>
-                </Modal>
-
                 {angleNode?.metadata?.content ? <CanvasNodeAngleDialog dataUrl={angleNode.metadata.content} open={Boolean(angleNode)} onClose={() => setAngleNodeId(null)} onConfirm={(params) => void generateAngleNode(angleNode!, params)} /> : null}
 
                 {previewNode && hasCanvasImageSource(previewNode.metadata) ? (() => {
@@ -5908,7 +5734,6 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                             isVideo={activeItemNode.type === CanvasNodeType.Video}
                             isPanorama={activeItemNode.type === CanvasNodeType.Panorama}
                             proxyGeneratedPanorama={activeItemNode.type === CanvasNodeType.Panorama && Boolean(activeItemNode.metadata?.imageTaskId || activeItemNode.metadata?.imageTaskResultId) && !activeItemNode.metadata?.storageKey}
-                            onDownload={() => downloadNodeImage(activeItemNode)}
                             onClose={() => setPreviewNodeId(null)}
                             hasPrev={currentIndex > 0}
                             hasNext={currentIndex < group.length - 1}
@@ -5918,6 +5743,28 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                     );
                 })() : null}
 
+                <Modal title="快捷键" open={shortcutsOpen} onCancel={() => setShortcutsOpen(false)} footer={null} centered>
+                    <div className="space-y-1 border-t pt-4 text-sm" style={{ borderColor: theme.node.stroke }}>
+                        <Shortcut keys={["Space", "拖动"]} value="临时切换选择 / 移动" />
+                        <Shortcut keys={["中键拖动"]} value="平移画布" />
+                        <Shortcut keys={["滚轮"]} value="缩放画布" />
+                        <Shortcut keys={["拖动空白处"]} value="框选节点" />
+                        <Shortcut keys={["Shift", "拖动空白处"]} value="追加框选" />
+                        <Shortcut keys={["Shift / Ctrl / Cmd", "点击"]} value="追加选择节点" />
+                        <Shortcut keys={["双击空白处"]} value="添加节点" />
+                        <Shortcut keys={["双击节点"]} value="预览媒体 / 编辑文字 / 展开图片组" />
+                        <Shortcut keys={["双击标题"]} value="重命名" />
+                        <Shortcut keys={["Ctrl / Cmd", "A"]} value="全选" />
+                        <Shortcut keys={["Ctrl / Cmd", "G"]} value="创建组" />
+                        <Shortcut keys={["Ctrl / Cmd", "C / V"]} value="复制 / 粘贴节点，或粘贴剪切板文本、图片" />
+                        <Shortcut keys={["Ctrl / Cmd", "Z"]} value="撤销" />
+                        <Shortcut keys={["Ctrl / Cmd", "Shift", "Z"]} value="重做（或 Ctrl / Cmd + Y）" />
+                        <Shortcut keys={["Delete / Backspace"]} value="删除选中节点或连线" />
+                        <Shortcut keys={["Esc"]} value="取消选择并关闭浮层" />
+                        <Shortcut keys={["Shift", "Space"]} value="串联试剪 播放 / 暂停" />
+                        <Shortcut keys={["拖入图片 / 视频 / 音频"]} value="添加到画布" />
+                    </div>
+                </Modal>
                 <Modal
                     title="清空画布？"
                     open={clearConfirmOpen}
@@ -5934,15 +5781,6 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 >
                     <p className="text-sm opacity-60">这会删除当前画布上的所有节点和连线。</p>
                 </Modal>
-
-                <AssetPickerModal
-                    open={assetPickerOpen}
-                    onInsert={handleAssetInsert}
-                    onClose={() => {
-                        assetInsertPositionRef.current = null;
-                        setAssetPickerOpen(false);
-                    }}
-                />
             </section>
             {assistantMounted ? (
                 <CanvasAssistantPanel
@@ -5957,11 +5795,6 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                     onSessionsChange={handleAssistantSessionsChange}
                     onAgentConfigChange={handleAgentConfigChange}
                     onPasteImage={pasteAssistantImage}
-                    onOpenUpload={() => handleUploadRequest()}
-                    onOpenAssets={() => {
-                        assetInsertPositionRef.current = null;
-                        setAssetPickerOpen(true);
-                    }}
                     getAgentContext={getCanvasAgentContext}
                     onExecuteAction={executeUnifiedAgentAction}
                     onAgentRunStart={startCanvasAgentBatch}
@@ -5972,6 +5805,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                         setAgentPanel((current) => ({ ...current, open: false }))
                     }
                     onCollapse={() => setAssistantMounted(false)}
+                    collapseSignal={assistantCollapseSignal}
                     initialRequest={initialAgentRequest}
                     onInitialRequestConsumed={() => setInitialAgentRequest(null)}
                     projectId={projectId}
@@ -5983,7 +5817,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     );
 }
 
-function FullscreenPreview({ src: content, storageKey, alt, isVideo, isPanorama, proxyGeneratedPanorama = false, onDownload, onClose, hasPrev, hasNext, onPrev, onNext }: { src: string; storageKey?: string; alt: string; isVideo?: boolean; isPanorama?: boolean; proxyGeneratedPanorama?: boolean; onDownload: () => void; onClose: () => void; hasPrev?: boolean; hasNext?: boolean; onPrev?: () => void; onNext?: () => void }) {
+function FullscreenPreview({ src: content, storageKey, alt, isVideo, isPanorama, proxyGeneratedPanorama = false, onClose, hasPrev, hasNext, onPrev, onNext }: { src: string; storageKey?: string; alt: string; isVideo?: boolean; isPanorama?: boolean; proxyGeneratedPanorama?: boolean; onClose: () => void; hasPrev?: boolean; hasNext?: boolean; onPrev?: () => void; onNext?: () => void }) {
     const source = useCanvasImageSource({ content, storageKey }, true, false, !isVideo);
     const src = source.src || "";
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
@@ -6192,9 +6026,6 @@ function FullscreenPreview({ src: content, storageKey, alt, isVideo, isPanorama,
                                 </div>
                             </div>
                             <div className="flex items-center gap-1">
-                                <button type="button" aria-label="下载视频" onPointerDown={(event) => event.preventDefault()} onClick={onDownload} className={VIDEO_PREVIEW_CONTROL_CLASS}>
-                                    <Download className="size-5" />
-                                </button>
                                 <button
                                     type="button"
                                     aria-label="全屏播放"
@@ -6237,51 +6068,35 @@ function FullscreenPreview({ src: content, storageKey, alt, isVideo, isPanorama,
 
 function CanvasTopBar({
     title,
-    sidePanelOpen,
-    onToggleSidePanel,
+    projectId,
     titleDraft,
     isTitleEditing,
     onTitleDraftChange,
     onStartTitleEditing,
     onFinishTitleEditing,
     onCancelTitleEditing,
-    canUndo,
-    canRedo,
     onHome,
-    onProjects,
-    onCreateProject,
-    onDeleteProject,
-    onImportImage,
-    onUndo,
-    onRedo,
-    assistantCollapsed,
-    onExpandAssistant,
+    sidePanelOpen,
+    onOpenSidePanel,
+    assistantOpen,
+    onToggleAssistant,
 }: {
     title: string;
-    sidePanelOpen: boolean;
-    onToggleSidePanel: () => void;
+    projectId: string;
     titleDraft: string;
     isTitleEditing: boolean;
     onTitleDraftChange: (value: string) => void;
     onStartTitleEditing: () => void;
     onFinishTitleEditing: () => void;
     onCancelTitleEditing: () => void;
-    canUndo: boolean;
-    canRedo: boolean;
     onHome: () => void;
-    onProjects: () => void;
-    onCreateProject: () => void;
-    onDeleteProject: () => void;
-    onImportImage: () => void;
-    onUndo: () => void;
-    onRedo: () => void;
-    assistantCollapsed: boolean;
-    onExpandAssistant: () => void;
+    sidePanelOpen: boolean;
+    onOpenSidePanel: () => void;
+    assistantOpen: boolean;
+    onToggleAssistant: () => void;
 }) {
-    const colorTheme = useThemeStore((state) => state.theme);
-    const theme = canvasThemes[colorTheme];
+    const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const titleRef = useRef<HTMLDivElement>(null);
-    const [shortcutsOpen, setShortcutsOpen] = useState(false);
 
     useEffect(() => {
         if (!isTitleEditing) return;
@@ -6293,115 +6108,60 @@ function CanvasTopBar({
     }, [isTitleEditing, onFinishTitleEditing]);
 
     return (
-        <>
-            <div className="pointer-events-none absolute left-0 right-0 top-0 z-50 flex h-16 items-center justify-between px-4">
-                <div className="pointer-events-auto flex min-w-0 items-center gap-3">
-                    <button
-                        type="button"
-                        onClick={onToggleSidePanel}
-                        className="grid size-7 place-items-center rounded-full transition hover:bg-black/5 dark:hover:bg-white/10"
-                        style={{ color: theme.node.text }}
-                        aria-label={sidePanelOpen ? "收起左侧面板" : "展开左侧面板"}
-                    >
-                        {sidePanelOpen ? <PanelLeftClose className="size-4" /> : <PanelLeftOpen className="size-4" />}
+        <div className="pointer-events-none absolute left-0 right-0 top-0 z-50 flex h-16 items-center justify-between px-4">
+            <div className="pointer-events-auto flex min-w-0 items-center gap-1.5">
+                {!sidePanelOpen ? (
+                    <button type="button" onClick={onOpenSidePanel} className="grid size-9 shrink-0 place-items-center rounded-lg transition hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.muted }} aria-label="展开左侧面板" title="展开左侧面板">
+                        <PanelLeftOpen className="size-4" />
                     </button>
-                    <Dropdown
-                        trigger={["click"]}
-                        menu={{
-                            items: [
-                                { key: "home", icon: <Home className="size-4" />, label: "主页", onClick: onHome },
-                                { key: "projects", icon: <Images className="size-4" />, label: "我的画布", onClick: onProjects },
-                                { type: "divider" },
-                                { key: "new", icon: <Plus className="size-4" />, label: "新建画布", onClick: onCreateProject },
-                                { key: "delete", danger: true, icon: <Trash2 className="size-4" />, label: "删除当前画布", onClick: onDeleteProject },
-                                { type: "divider" },
-                                { key: "import", icon: <Upload className="size-4" />, label: "导入素材", onClick: onImportImage },
-                                { type: "divider" },
-                                { key: "undo", disabled: !canUndo, icon: <Undo2 className="size-4" />, label: <MenuLabel text="撤销" shortcut="⌘ Z" />, onClick: onUndo },
-                                { key: "redo", disabled: !canRedo, icon: <Redo2 className="size-4" />, label: <MenuLabel text="重做" shortcut="⌘ ⇧ Z / ⌘ Y" />, onClick: onRedo },
-                            ],
-                        }}
-                    >
-                        <button type="button" className="grid size-9 place-items-center rounded-full transition hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} aria-label="打开画布菜单">
-                            <Menu className="size-5" />
+                ) : null}
+                <div ref={titleRef} className="flex min-w-0 items-center">
+                    {isTitleEditing ? (
+                        <input
+                            autoFocus
+                            value={titleDraft}
+                            onChange={(event) => onTitleDraftChange(event.target.value)}
+                            onBlur={onFinishTitleEditing}
+                            onKeyDown={(event) => {
+                                if (event.key === "Enter") onFinishTitleEditing();
+                                if (event.key === "Escape") onCancelTitleEditing();
+                            }}
+                            className="max-w-[320px] bg-transparent p-0 text-left text-base font-semibold tracking-normal outline-none"
+                            style={{ color: theme.node.text }}
+                        />
+                    ) : (
+                        <button
+                            type="button"
+                            className="max-w-[320px] truncate border-b border-dashed border-transparent px-1 text-left text-base font-semibold tracking-normal transition hover:border-current"
+                            style={{ color: theme.node.text }}
+                            onDoubleClick={onStartTitleEditing}
+                            title="双击修改画布名称"
+                        >
+                            {title}
                         </button>
-                    </Dropdown>
-
-                    <div ref={titleRef} className="flex min-w-0 items-center gap-2">
-                        {isTitleEditing ? (
-                            <input
-                                autoFocus
-                                value={titleDraft}
-                                onChange={(event) => onTitleDraftChange(event.target.value)}
-                                onBlur={onFinishTitleEditing}
-                                onKeyDown={(event) => {
-                                    if (event.key === "Enter") onFinishTitleEditing();
-                                    if (event.key === "Escape") onCancelTitleEditing();
-                                }}
-                                className="max-w-[280px] bg-transparent p-0 text-left text-lg font-semibold tracking-normal outline-none"
-                                style={{ color: theme.node.text }}
-                            />
-                        ) : (
-                            <button
-                                type="button"
-                                className="max-w-[280px] truncate border-b border-dashed border-transparent text-left text-lg font-semibold tracking-normal transition hover:border-current"
-                                onDoubleClick={onStartTitleEditing}
-                                title="双击修改画布名称"
-                            >
-                                {title}
-                            </button>
-                        )}
-                    </div>
-                </div>
-
-                <div className="pointer-events-auto flex items-center gap-1.5">
-                    <UserStatusActions
-                        variant="canvas"
-                        onOpenShortcuts={() => {
-                            setShortcutsOpen(true);
-                        }}
-                    />
-                    {assistantCollapsed ? (
-                        <>
-                            <span className="h-6 w-px" style={{ background: theme.toolbar.border }} />
-                            <Button
-                                type="text"
-                                className="!h-10 !rounded-xl !px-3 !font-medium"
-                                style={{ background: theme.toolbar.panel, color: theme.node.text, boxShadow: "0 10px 30px rgba(28,25,23,.10)" }}
-                                icon={<Bot className="size-4" />}
-                                onClick={onExpandAssistant}
-                            >
-                                Agent
-                            </Button>
-                        </>
-                    ) : null}
+                    )}
                 </div>
             </div>
-            <Modal title="快捷键" open={shortcutsOpen} onCancel={() => setShortcutsOpen(false)} footer={null} centered>
-                <div className="space-y-2 border-t pt-4 text-sm" style={{ borderColor: theme.node.stroke }}>
-                    <Shortcut keys={["Space", "拖动"]} value="临时反转选择/移动工具" />
-                    <Shortcut keys={["滚轮"]} value="缩放画布" />
-                    <Shortcut keys={["拖动"]} value="使用当前工具操作画布" />
-                    <Shortcut keys={["Shift / Ctrl / Cmd", "点击"]} value="追加选择节点" />
-                    <Shortcut keys={["Ctrl / Cmd", "G"]} value="创建组" />
-                    <Shortcut keys={["Ctrl / Cmd", "C / V"]} value="复制 / 粘贴节点，或粘贴剪切板文本/图片" />
-                    <Shortcut keys={["Ctrl / Cmd", "Z"]} value="撤销" />
-                    <Shortcut keys={["Ctrl / Cmd", "Shift", "Z"]} value="重做" />
-                    <Shortcut keys={["Delete / Backspace"]} value="删除选中" />
-                    <Shortcut keys={["Esc"]} value="取消选择并关闭浮层" />
-                    <Shortcut keys={["拖入图片/视频/音频"]} value="上传到画布" />
-                </div>
-            </Modal>
-        </>
-    );
-}
 
-function MenuLabel({ text, shortcut }: { text: string; shortcut: string }) {
-    return (
-        <span className="flex min-w-36 items-center justify-between gap-8">
-            <span>{text}</span>
-            <span className="text-xs opacity-45">{shortcut}</span>
-        </span>
+            <div className="pointer-events-auto flex items-center gap-3">
+                <CanvasSaveIndicator projectId={projectId} />
+                <button type="button" onClick={onHome} className="flex h-9 shrink-0 items-center gap-1.5 rounded-lg px-2 text-sm transition hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.muted }} aria-label="返回我的画布" title="返回我的画布">
+                    <LayoutGrid className="size-4" />
+                    <span>我的画布</span>
+                </button>
+                <Button
+                    type="text"
+                    className="!h-9 !rounded-xl !px-3 !font-medium"
+                    style={assistantOpen ? { background: theme.toolbar.activeBg, color: theme.toolbar.activeText } : { background: theme.toolbar.panel, color: theme.node.text, boxShadow: "0 10px 30px rgba(28,25,23,.10)" }}
+                    icon={<Bot className="size-4" />}
+                    aria-pressed={assistantOpen}
+                    aria-label={assistantOpen ? "收起 AI 面板" : "打开 AI 面板"}
+                    onClick={onToggleAssistant}
+                >
+                    Agent
+                </Button>
+            </div>
+        </div>
     );
 }
 

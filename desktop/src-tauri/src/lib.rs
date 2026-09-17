@@ -320,7 +320,7 @@ fn start_desktop(app: &mut App) -> Result<(), String> {
     WebviewWindowBuilder::new(
         app,
         "main",
-        WebviewUrl::External("http://127.0.0.1:3100".parse().unwrap()),
+        WebviewUrl::External(format!("http://127.0.0.1:{WEB_PORT}").parse().unwrap()),
     )
     .title("小陈的画布")
     .inner_size(1440.0, 900.0)

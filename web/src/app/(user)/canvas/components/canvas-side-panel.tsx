@@ -2,13 +2,14 @@
 
 import { useStoredMediaSource } from "@/hooks/use-stored-media-source";
 import { assetMediaReference } from "@/services/asset-media-reference";
-import { memo, useEffect, useMemo, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { Empty, Input, Spin } from "antd";
+import { memo, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { App, Empty, Input, Spin, Tooltip } from "antd";
 import { useQuery } from "@tanstack/react-query";
-import { BookOpen, ChevronRight, Eye, FileText, Music2, Plus, Search } from "lucide-react";
+import { BookOpen, ChevronRight, Download, Eye, FileText, FileUp, Music2, PanelLeftClose, Plus, Search } from "lucide-react";
 import { motion } from "motion/react";
 
 import { AssetFormModal } from "@/components/assets/asset-form-modal";
+import { exportAssets, readAssetPackage } from "@/app/(user)/assets/asset-transfer";
 import { PromptDetailDialog } from "@/components/prompts/prompt-detail-dialog";
 import { usePromptActions } from "@/components/prompts/use-prompt-actions";
 import { useCopyText } from "@/hooks/use-copy-text";
@@ -20,7 +21,8 @@ import { useThemeStore } from "@/stores/use-theme-store";
 
 import type { CanvasNodeData } from "../types";
 import { CanvasNodeOutline } from "./canvas-node-outline";
-import type { InsertAssetPayload } from "./asset-picker-modal";
+import { CanvasAssetDetailDrawer } from "./canvas-asset-detail-drawer";
+import type { InsertAssetPayload } from "../types";
 
 export const CANVAS_ASSET_DRAG_TYPE = "application/x-infinite-canvas-asset";
 
@@ -44,6 +46,7 @@ type Props = {
     onAssetDragStart: (payload: InsertAssetPayload) => void;
     onAssetDragEnd: () => void;
     onInsertAsset: (payload: InsertAssetPayload) => void;
+    onToggle: () => void;
 };
 
 const ASSET_TYPE_OPTIONS = [
@@ -54,7 +57,7 @@ const ASSET_TYPE_OPTIONS = [
     { label: "音频", value: "audio" },
 ];
 
-export function CanvasSidePanel({ nodes, selectedNodeIds, open, width, spotlightGroupId, onWidthChange, onFocusNode, onFocusGroup, onAssetDragStart, onAssetDragEnd, onInsertAsset }: Props) {
+export function CanvasSidePanel({ nodes, selectedNodeIds, open, width, spotlightGroupId, onWidthChange, onFocusNode, onFocusGroup, onAssetDragStart, onAssetDragEnd, onInsertAsset, onToggle }: Props) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [tab, setTab] = useState<PanelTab>("canvas");
     const [mounted, setMounted] = useState(open);
@@ -112,12 +115,15 @@ export function CanvasSidePanel({ nodes, selectedNodeIds, open, width, spotlight
                     <PanelTabButton label="画布" active={tab === "canvas"} theme={theme} onClick={() => setTab("canvas")} />
                     <PanelTabButton label="资产" active={tab === "assets"} theme={theme} onClick={() => setTab("assets")} />
                     <PanelTabButton label="提示词库" active={tab === "prompts"} theme={theme} onClick={() => setTab("prompts")} />
+                    <button type="button" onClick={onToggle} className="ml-auto grid size-7 place-items-center rounded-full opacity-55 transition hover:opacity-100 hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} aria-label="收起左侧面板" title="收起左侧面板">
+                        <PanelLeftClose className="size-4" />
+                    </button>
                 </div>
                 <div className="mt-2 min-h-0 flex-1 overflow-hidden">
                     {tab === "canvas" ? (
                         <CanvasNodeOutline nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={onFocusNode} spotlightGroupId={spotlightGroupId} onFocusGroup={onFocusGroup} />
                     ) : tab === "assets" ? (
-                        <CanvasAssetsTab theme={theme} onAssetDragStart={onAssetDragStart} onAssetDragEnd={onAssetDragEnd} />
+                        <CanvasAssetsTab theme={theme} onAssetDragStart={onAssetDragStart} onAssetDragEnd={onAssetDragEnd} onInsert={onInsertAsset} />
                     ) : (
                         <CanvasPromptsTab theme={theme} onInsert={onInsertAsset} />
                     )}
@@ -137,13 +143,69 @@ function PanelTabButton({ label, active, theme, onClick }: { label: string; acti
     );
 }
 
-const CanvasAssetsTab = memo(function CanvasAssetsTab({ theme, onAssetDragStart, onAssetDragEnd }: { theme: CanvasTheme; onAssetDragStart: (payload: InsertAssetPayload) => void; onAssetDragEnd: () => void }) {
+const CanvasAssetsTab = memo(function CanvasAssetsTab({ theme, onAssetDragStart, onAssetDragEnd, onInsert }: { theme: CanvasTheme; onAssetDragStart: (payload: InsertAssetPayload) => void; onAssetDragEnd: () => void; onInsert: (payload: InsertAssetPayload) => void }) {
+    const { message } = App.useApp();
+    const assets = useAssetStore((state) => state.assets);
+    const addAsset = useAssetStore((state) => state.addAsset);
+    const importInputRef = useRef<HTMLInputElement>(null);
     const [formOpen, setFormOpen] = useState(false);
+    const [editingAsset, setEditingAsset] = useState<Asset | null>(null);
+    const [detailAsset, setDetailAsset] = useState<Asset | null>(null);
+
+    const importAssetZip = async (file?: File) => {
+        if (!file) return;
+        try {
+            const imported = await readAssetPackage(file);
+            imported.forEach((asset) => {
+                const payload = { ...asset } as Record<string, unknown>;
+                delete payload.id;
+                delete payload.createdAt;
+                delete payload.updatedAt;
+                addAsset(payload as Parameters<typeof addAsset>[0]);
+            });
+            message.success(`已导入 ${imported.length} 个素材`);
+        } catch {
+            message.error("导入失败，请选择有效的素材压缩包");
+        } finally {
+            if (importInputRef.current) importInputRef.current.value = "";
+        }
+    };
+    const exportAll = async () => {
+        if (!assets.length) {
+            message.warning("暂无素材可导出");
+            return;
+        }
+        await exportAssets(assets);
+    };
 
     return (
         <div className="flex h-full flex-col">
-            <MyAssetsTab theme={theme} onAdd={() => setFormOpen(true)} onAssetDragStart={onAssetDragStart} onAssetDragEnd={onAssetDragEnd} />
-            <AssetFormModal open={formOpen} onClose={() => setFormOpen(false)} />
+            <MyAssetsTab
+                theme={theme}
+                onAdd={() => {
+                    setEditingAsset(null);
+                    setFormOpen(true);
+                }}
+                onImport={() => importInputRef.current?.click()}
+                onExport={() => void exportAll()}
+                onOpen={setDetailAsset}
+                onAssetDragStart={onAssetDragStart}
+                onAssetDragEnd={onAssetDragEnd}
+            />
+            <input ref={importInputRef} type="file" accept="application/zip,.zip" className="hidden" onChange={(event) => void importAssetZip(event.target.files?.[0])} />
+            <AssetFormModal open={formOpen} asset={editingAsset} onClose={() => setFormOpen(false)} />
+            <CanvasAssetDetailDrawer
+                asset={detailAsset}
+                onClose={() => setDetailAsset(null)}
+                onEdit={(asset) => {
+                    setEditingAsset(asset);
+                    setFormOpen(true);
+                }}
+                onInsert={(asset) => {
+                    onInsert(assetPayload(asset));
+                    setDetailAsset(null);
+                }}
+            />
         </div>
     );
 });
@@ -157,7 +219,7 @@ function AssetSourceTab({ label, active, theme, onClick }: { label: string; acti
     );
 }
 
-function MyAssetsTab({ theme, onAdd, onAssetDragStart, onAssetDragEnd }: { theme: CanvasTheme; onAdd: () => void; onAssetDragStart: (payload: InsertAssetPayload) => void; onAssetDragEnd: () => void }) {
+function MyAssetsTab({ theme, onAdd, onImport, onExport, onOpen, onAssetDragStart, onAssetDragEnd }: { theme: CanvasTheme; onAdd: () => void; onImport: () => void; onExport: () => void; onOpen: (asset: Asset) => void; onAssetDragStart: (payload: InsertAssetPayload) => void; onAssetDragEnd: () => void }) {
     const assets = useAssetStore((state) => state.assets);
     const [keyword, setKeyword] = useState("");
     const [type, setType] = useState("");
@@ -177,24 +239,35 @@ function MyAssetsTab({ theme, onAdd, onAssetDragStart, onAssetDragEnd }: { theme
                     <Plus className="size-3.5" />
                     添加
                 </button>
+                <Tooltip title="导入素材包（ZIP）">
+                    <button type="button" onClick={onImport} className="grid size-7 shrink-0 place-items-center rounded-md opacity-70 transition hover:bg-black/5 hover:opacity-100 dark:hover:bg-white/10" style={{ color: theme.node.text }} aria-label="导入素材">
+                        <FileUp className="size-3.5" />
+                    </button>
+                </Tooltip>
+                <Tooltip title="导出全部素材（ZIP）">
+                    <button type="button" onClick={onExport} className="grid size-7 shrink-0 place-items-center rounded-md opacity-70 transition hover:bg-black/5 hover:opacity-100 dark:hover:bg-white/10" style={{ color: theme.node.text }} aria-label="导出素材">
+                        <Download className="size-3.5" />
+                    </button>
+                </Tooltip>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-                {filtered.length ? <div className="grid grid-cols-2 gap-2 px-1 pt-1">{filtered.map((asset) => <AssetDragCard key={asset.id} asset={asset} theme={theme} onAssetDragStart={onAssetDragStart} onAssetDragEnd={onAssetDragEnd} />)}</div> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无素材" className="pt-16" />}
+                {filtered.length ? <div className="grid grid-cols-2 gap-2 px-1 pt-1">{filtered.map((asset) => <AssetDragCard key={asset.id} asset={asset} theme={theme} onOpen={() => onOpen(asset)} onAssetDragStart={onAssetDragStart} onAssetDragEnd={onAssetDragEnd} />)}</div> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无素材" className="pt-16" />}
             </div>
         </>
     );
 }
 
-function AssetDragCard({ asset, theme, onAssetDragStart, onAssetDragEnd }: { asset: Asset; theme: CanvasTheme; onAssetDragStart: (payload: InsertAssetPayload) => void; onAssetDragEnd: () => void }) {
+function AssetDragCard({ asset, theme, onOpen, onAssetDragStart, onAssetDragEnd }: { asset: Asset; theme: CanvasTheme; onOpen: () => void; onAssetDragStart: (payload: InsertAssetPayload) => void; onAssetDragEnd: () => void }) {
     const source = useStoredMediaSource({ ...assetMediaReference(asset, true), observe: true });
-    return <div ref={source.ref}><DraggableAssetCard theme={theme} title={asset.title} payload={assetPayload(asset)} kind={asset.kind} imageUrl={source.src} text={asset.kind === "text" ? asset.data.content : ""} onAssetDragStart={onAssetDragStart} onAssetDragEnd={onAssetDragEnd} /></div>;
+    return <div ref={source.ref}><DraggableAssetCard theme={theme} title={asset.title} payload={assetPayload(asset)} kind={asset.kind} imageUrl={source.src} text={asset.kind === "text" ? asset.data.content : ""} onOpen={onOpen} onAssetDragStart={onAssetDragStart} onAssetDragEnd={onAssetDragEnd} /></div>;
 }
 
-function DraggableAssetCard({ theme, title, payload, kind, imageUrl, text, onAssetDragStart, onAssetDragEnd }: { theme: CanvasTheme; title: string; payload: InsertAssetPayload; kind: "text" | "image" | "video" | "audio"; imageUrl: string; text: string; onAssetDragStart: (payload: InsertAssetPayload) => void; onAssetDragEnd: () => void }) {
+function DraggableAssetCard({ theme, title, payload, kind, imageUrl, text, onOpen, onAssetDragStart, onAssetDragEnd }: { theme: CanvasTheme; title: string; payload: InsertAssetPayload; kind: "text" | "image" | "video" | "audio"; imageUrl: string; text: string; onOpen: () => void; onAssetDragStart: (payload: InsertAssetPayload) => void; onAssetDragEnd: () => void }) {
     return (
         <div
             draggable
-            title={title}
+            title={`${title}（拖入画布插入，点击查看详情）`}
+            onClick={onOpen}
             onDragStart={(event) => {
                 event.dataTransfer.setData(CANVAS_ASSET_DRAG_TYPE, "asset");
                 event.dataTransfer.effectAllowed = "copy";

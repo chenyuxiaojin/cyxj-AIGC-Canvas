@@ -1,19 +1,15 @@
 "use client";
 
-import { Menu } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 import { navigationTools, type NavigationToolSlug } from "@/constant/navigation-tools";
 import { AppConfigModal } from "@/components/layout/app-config-modal";
-import { MobileNavDrawer } from "@/components/layout/mobile-nav-drawer";
 import { UserStatusActions } from "@/components/layout/user-status-actions";
 import { cn } from "@/lib/utils";
-import { useState } from "react";
 
 export function AppTopNav() {
     const pathname = usePathname();
-    const [mobileNavOpen, setMobileNavOpen] = useState(false);
     const hideHeader = /^\/canvas\/[^/]+/.test(pathname);
     const slug = pathname.split("/").filter(Boolean)[0];
     const activeToolSlug = navigationTools.some((tool) => tool.slug === slug) ? (slug as NavigationToolSlug) : undefined;
@@ -35,17 +31,7 @@ export function AppTopNav() {
                                 <span className="text-base font-medium">小陈的画布</span>
                             </Link>
 
-                            <button
-                                type="button"
-                                className="ml-3 inline-flex size-8 shrink-0 items-center justify-center text-stone-600 transition hover:text-stone-950 md:hidden dark:text-stone-300 dark:hover:text-white"
-                                onClick={() => setMobileNavOpen(true)}
-                                aria-label="打开导航菜单"
-                                title="导航菜单"
-                            >
-                                <Menu className="size-5" />
-                            </button>
-
-                            <nav className="hide-scrollbar ml-8 hidden h-16 min-w-0 items-center gap-7 overflow-x-auto md:flex">
+                            <nav className="ml-8 flex h-16 min-w-0 items-center gap-7">
                                 {navigationTools.map((tool) => {
                                     const Icon = tool.icon;
                                     const active = tool.slug === activeToolSlug;
@@ -75,7 +61,6 @@ export function AppTopNav() {
                 </header>
             ) : null}
 
-            <MobileNavDrawer open={mobileNavOpen} activeToolSlug={activeToolSlug} onClose={() => setMobileNavOpen(false)} />
             <AppConfigModal />
         </>
     );

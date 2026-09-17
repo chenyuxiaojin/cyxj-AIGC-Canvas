@@ -12,7 +12,7 @@ export default function NotFound() {
                     <div className="mt-8 flex flex-wrap justify-center gap-3">
                         <Link href="/" className="inline-flex h-10 items-center gap-2 rounded-lg bg-stone-950 px-4 text-sm font-medium text-white transition hover:bg-stone-800 dark:bg-stone-100 dark:text-stone-950 dark:hover:bg-stone-200">
                             <Home className="size-4" />
-                            返回首页
+                            返回我的画布
                         </Link>
                     </div>
                 </section>

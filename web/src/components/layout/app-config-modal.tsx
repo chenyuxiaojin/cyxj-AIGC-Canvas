@@ -1,10 +1,11 @@
 "use client";
 
-import { App, Button, Form, Input, Modal, Select, Switch } from "antd";
+import { App, Button, Form, Input, Modal, Segmented, Select, Switch } from "antd";
 import { useState } from "react";
 
 import { ChannelModelSelectorModal } from "@/components/channel-model-selector-modal";
 import { DesktopRuntimePanel } from "@/components/layout/desktop-runtime-panel";
+import { VersionReleaseModal } from "@/components/layout/version-release-modal";
 import { GrokTtsVoiceSelect } from "@/components/grok-tts-voice-select";
 import { ModelPicker } from "@/components/model-picker";
 import { fetchImageModels } from "@/services/api/image";
@@ -15,6 +16,7 @@ import { geminiTtsVoiceOptions, normalizeGeminiTtsVoice } from "@/lib/gemini-tts
 import { isMimoPresetTtsModel, isMimoTtsModel, isMimoVoiceCloneModel, isMimoVoiceDesignModel, mimoTtsFormatOptions, mimoTtsVoiceOptions } from "@/lib/mimo-tts";
 import { modelChannelApiKeyUrls, modelChannelDefaultBaseUrls } from "@/lib/model-channel";
 import { buildApiUrl, filterChannelModelsByCapability, normalizeLocalChannels, useConfigStore, useEffectiveConfig, type AiConfig, type LocalModelChannel, type ModelCapability } from "@/stores/use-config-store";
+import { useThemeStore } from "@/stores/use-theme-store";
 
 type ModelGroup = {
     capability: ModelCapability;
@@ -39,6 +41,8 @@ export function AppConfigModal() {
     const config = useConfigStore((state) => state.config);
     const updateConfig = useConfigStore((state) => state.updateConfig);
     const isConfigOpen = useConfigStore((state) => state.isConfigOpen);
+    const theme = useThemeStore((state) => state.theme);
+    const setTheme = useThemeStore((state) => state.setTheme);
     const shouldPromptContinue = useConfigStore((state) => state.shouldPromptContinue);
     const setConfigDialogOpen = useConfigStore((state) => state.setConfigDialogOpen);
     const clearPromptContinue = useConfigStore((state) => state.clearPromptContinue);
@@ -155,9 +159,23 @@ export function AppConfigModal() {
             onCancel={() => setConfigDialogOpen(false)}
             styles={{ body: { maxHeight: "72vh", overflowY: "auto", paddingRight: 18 } }}
             footer={
-                <Button type="primary" onClick={() => void finishConfig()}>
-                    完成
-                </Button>
+                <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-3 text-xs text-stone-500">
+                        <Segmented
+                            size="small"
+                            value={theme}
+                            onChange={(value) => setTheme(value as "light" | "dark")}
+                            options={[
+                                { value: "light", label: "浅色" },
+                                { value: "dark", label: "深色" },
+                            ]}
+                        />
+                        <VersionReleaseModal className="cursor-pointer text-xs text-stone-500 transition hover:text-stone-950 dark:text-stone-400 dark:hover:text-white" />
+                    </div>
+                    <Button type="primary" onClick={() => void finishConfig()}>
+                        完成
+                    </Button>
+                </div>
             }
         >
             <div className="pt-1">

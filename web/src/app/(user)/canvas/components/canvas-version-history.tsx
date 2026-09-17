@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState } from "react";
 import { App, Button, Modal, Spin } from "antd";
-import { History } from "lucide-react";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { isDesktopRuntime } from "@/services/desktop-runtime";
@@ -11,11 +10,10 @@ import { useCanvasStore } from "../stores/use-canvas-store";
 
 const reasons: Record<string, string> = { initial: "首次保留", initial_save: "首次保存", save: "编辑保存", before_restore: "恢复前保留", restore: "恢复版本" };
 
-export function CanvasVersionHistory({ projectId }: { projectId: string }) {
+export function CanvasVersionHistory({ projectId, open, onClose }: { projectId: string; open: boolean; onClose: () => void }) {
     const { message } = App.useApp();
     const theme = canvasThemes[useThemeStore((s) => s.theme)];
     const project = useCanvasStore((s) => s.projects.find((p) => p.id === projectId));
-    const [open, setOpen] = useState(false);
     const [versions, setVersions] = useState<CanvasVersion[]>([]);
     const [preview, setPreview] = useState<CanvasVersionPreview>();
     const [busy, setBusy] = useState(false);
@@ -54,8 +52,7 @@ export function CanvasVersionHistory({ projectId }: { projectId: string }) {
     };
     const changedNodes = preview?.project.nodes.filter((node) => JSON.stringify(project?.nodes.find((n) => n.id === node.id)) !== JSON.stringify(node)) || [];
     return <>
-        <button type="button" onClick={() => setOpen(true)} title="版本历史" aria-label="版本历史" className="flex items-center gap-1 px-2 py-1 text-xs opacity-70 hover:opacity-100" style={{ color: theme.node.text }}><History size={14} />版本历史</button>
-        <Modal title="版本历史" open={open} onCancel={() => { if (!busy) setOpen(false); }} footer={null} width={760}>
+        <Modal title="版本历史" open={open} onCancel={() => { if (!busy) onClose(); }} footer={null} width={760}>
             <p className="mb-3 text-xs" style={{ color: theme.node.muted }}>历史跨重启保留。普通编辑最多每 30 秒记录一次，保留最近 100 个版本、约 64 MB；恢复前后至少保留两个版本。原素材不复制、不清理。</p>
             {error && <p role="alert" className="mb-3">{error}</p>}
             {busy && <Spin size="small" />}

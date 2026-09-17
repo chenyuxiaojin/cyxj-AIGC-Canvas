@@ -9,6 +9,7 @@ function getTagColor(type: string) {
     if (type === "新增") return "green";
     if (type === "修复") return "red";
     if (type === "调整") return "blue";
+    if (type === "移除") return "orange";
     if (type === "文档") return "purple";
     return "default";
 }
@@ -55,7 +56,12 @@ export function VersionReleaseModal({ className, style }: VersionReleaseModalPro
                 <div className="mb-5 rounded-lg border border-stone-200 p-3 dark:border-stone-800">
                     <div className="text-xs text-stone-500 dark:text-stone-400">当前版本</div>
                     <div className="mt-1 text-base font-semibold text-stone-950 dark:text-stone-100">{APP_VERSION}</div>
-                    <p className="mt-2 text-xs text-stone-500">独立本机版本，不跟随上游检查更新。</p>
+                    <p className="mt-2 text-xs text-stone-500">
+                        独立本机版本，不跟随上游检查更新。上游开源项目：
+                        <a href="https://github.com/tigerowo/infinite-canvas" target="_blank" rel="noreferrer" className="underline decoration-stone-300 underline-offset-2 hover:text-stone-900 dark:hover:text-stone-100">
+                            tigerowo/infinite-canvas
+                        </a>
+                    </p>
                 </div>
                 <div className="max-h-[56vh] overflow-y-auto pr-2">
                     <Timeline

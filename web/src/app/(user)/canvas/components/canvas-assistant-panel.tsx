@@ -26,6 +26,7 @@ import { CanvasTerminalDrawer } from "./canvas-terminal-drawer";
 
 import { ImageGenerationPending } from "@/components/image-generation-pending";
 import { isTauri } from "@tauri-apps/api/core";
+import { CanvasCommandPermissionsSetting } from "./canvas-command-permissions";
 import { codexContextPercent } from "@/services/canvas-codex";
 import { ensureCanvasAgentWorkspace } from "@/services/desktop-terminal";
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -67,8 +68,6 @@ type CanvasAssistantPanelProps = {
     onSessionsChange: (sessions: CanvasAssistantSession[], activeSessionId: string | null) => void;
     onAgentConfigChange: (patch: Partial<CanvasAgentConfig>) => void;
     onPasteImage: (file: File) => void;
-    onOpenUpload: () => void;
-    onOpenAssets: () => void;
     getAgentContext: (state: CanvasAgentState) => CanvasAgentContext;
     onExecuteAction: (action: CanvasAgentAction, messageReferenceNodeIds: string[]) => Promise<CanvasAgentToolResult>;
     onAgentRunStart: (input: { batchId: string; summary: string }) => void;
@@ -76,6 +75,8 @@ type CanvasAssistantPanelProps = {
     onAgentActionResult: (input: { batchId: string; action: CanvasAgentAction; result: CanvasAgentToolResult }) => void;
     onAgentRunComplete: (input: { batchId: string; error?: string }) => void;
     onCollapseStart: () => void;
+    /** 每次变化（>0）都触发一次收起，供顶栏开关使用 */
+    collapseSignal?: number;
     onCollapse: () => void;
     initialRequest?: { prompt: string; references: CanvasAssistantReference[] } | null;
     onInitialRequestConsumed?: () => void;
@@ -103,8 +104,6 @@ export function CanvasAssistantPanel({
     onSessionsChange,
     onAgentConfigChange,
     onPasteImage,
-    onOpenUpload,
-    onOpenAssets,
     getAgentContext,
     onExecuteAction,
     onAgentRunStart,
@@ -112,6 +111,7 @@ export function CanvasAssistantPanel({
     onAgentActionResult,
     onAgentRunComplete,
     onCollapseStart,
+    collapseSignal = 0,
     onCollapse,
     initialRequest,
     onInitialRequestConsumed,
@@ -493,6 +493,11 @@ export function CanvasAssistantPanel({
         onCollapseStart();
         window.setTimeout(onCollapse, PANEL_MOTION_MS);
     };
+    const collapseRef = useRef(collapse);
+    collapseRef.current = collapse;
+    useEffect(() => {
+        if (collapseSignal > 0) collapseRef.current();
+    }, [collapseSignal]);
 
     return (
         <motion.div
@@ -709,8 +714,6 @@ export function CanvasAssistantPanel({
                                 settleDeleteConfirmation(false);
                                 abortRef.current?.abort();
                             }}
-                            onOpenUpload={onOpenUpload}
-                            onOpenAssets={onOpenAssets}
                             onPasteImage={onPasteImage}
                         />
                     </>
@@ -731,6 +734,7 @@ export function CanvasAssistantPanel({
                         </div>
                         <Switch checked={Boolean(agentConfig.autoGenerateMedia)} onChange={(autoGenerateMedia) => onAgentConfigChange({ autoGenerateMedia })} />
                     </div>
+                    {projectId && isTauri() ? <CanvasCommandPermissionsSetting projectId={projectId} /> : null}
                 </Modal>
 
                 <Modal

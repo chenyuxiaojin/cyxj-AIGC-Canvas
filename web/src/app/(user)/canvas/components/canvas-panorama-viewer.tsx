@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
-import { Maximize2, Move } from "lucide-react";
+import { Move } from "lucide-react";
 import { SYSTEM, Viewer } from "@photo-sphere-viewer/core";
 import "@photo-sphere-viewer/core/index.css";
 
@@ -231,23 +231,6 @@ export default function CanvasPanoramaViewer({ src, alt, proxyGeneratedPanorama 
                     onDoubleClick={(event) => event.stopPropagation()}
                 >
                     <Move className="size-3.5" />
-                </button>
-            ) : null}
-            {onOpen ? (
-                <button
-                    type="button"
-                    title="沉浸式查看"
-                    aria-label="沉浸式查看"
-                    className="absolute bottom-2 left-2 z-20 flex size-7 items-center justify-center rounded-md opacity-70 backdrop-blur transition-opacity hover:opacity-100"
-                    style={controlStyle}
-                    onClick={(event) => {
-                        event.stopPropagation();
-                        onOpen();
-                    }}
-                    onMouseDown={(event) => event.stopPropagation()}
-                    onDoubleClick={(event) => event.stopPropagation()}
-                >
-                    <Maximize2 className="size-3.5" />
                 </button>
             ) : null}
         </div>

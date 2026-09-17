@@ -1,8 +1,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronUp, Download, Film, Pause, Play, RotateCcw, X } from "lucide-react";
-import { message } from "antd";
+import { ChevronUp, Film, Pause, Play, RotateCcw, X } from "lucide-react";
 
 import type { CanvasTheme } from "@/lib/canvas-theme";
 import { CanvasNodeType, type CanvasNodeData } from "../types";
@@ -27,12 +26,13 @@ export function CanvasSequentialPlayer({ nodes, spotlightGroupId, selectedNodeId
     const shotSequence = useMemo(() => {
         let candidateNodes = nodes.filter((n) => n.type === CanvasNodeType.Video && Boolean(n.metadata?.content));
 
-        // 如果开启了场次聚光灯，仅播放该场次镜头
+        // 只在两种触发下出现：场次聚光灯（播该场次），或选中 ≥2 个视频节点（播选中）。其余时候不显示。
         if (spotlightGroupId) {
             candidateNodes = candidateNodes.filter((n) => n.metadata?.groupId === spotlightGroupId);
         } else if (selectedNodeIds.size > 1) {
-            // 如果选中了多个镜头，按选中镜头播放
             candidateNodes = candidateNodes.filter((n) => selectedNodeIds.has(n.id));
+        } else {
+            candidateNodes = [];
         }
 
         // 按 X 坐标或自然顺序排序
@@ -115,10 +115,6 @@ export function CanvasSequentialPlayer({ nodes, spotlightGroupId, selectedNodeId
     // 计算已播放的全局时间
     const elapsedGlobalMs = shotDurations.slice(0, currentShotIndex).reduce((sum, d) => sum + d, 0) + currentShotProgressMs;
 
-    const handleExportEdl = () => {
-        message.success("已导出当前场次剪辑时码表 (EDL / FCPXML) 供达芬奇导入");
-    };
-
     return (
         <div
             className="fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-2xl border shadow-2xl backdrop-blur-xl transition-all duration-300"
@@ -186,15 +182,6 @@ export function CanvasSequentialPlayer({ nodes, spotlightGroupId, selectedNodeId
                         </div>
 
                         <div className="flex items-center gap-2">
-                            <button
-                                type="button"
-                                onClick={handleExportEdl}
-                                className="flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs opacity-75 transition hover:opacity-100"
-                                style={{ borderColor: theme.node.stroke }}
-                            >
-                                <Download className="size-3.5" />
-                                <span>导出 EDL/XML</span>
-                            </button>
                             <button
                                 type="button"
                                 onClick={() => setCollapsed(true)}

@@ -12,7 +12,13 @@ export const useThemeStore = create<ThemeStore>()(
     persist(
         (set) => ({
             theme: "dark",
-            setTheme: (theme) => set({ theme }),
+            setTheme: (theme) => {
+                if (typeof document !== "undefined") {
+                    document.documentElement.classList.toggle("dark", theme === "dark");
+                    document.documentElement.style.colorScheme = theme;
+                }
+                set({ theme });
+            },
         }),
         { name: "infinite-canvas:theme_store" },
     ),
