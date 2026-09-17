@@ -176,6 +176,29 @@ export async function selectFilmDirectory(): Promise<string | null> {
     return invoke<string | null>("select_film_directory");
 }
 
+/** Resolve an explicit binding before starting a local Agent; never guess by title. */
+export async function ensureCanvasAgentWorkspace(projectId: string | undefined, projectTitle: string | undefined, signal: AbortSignal): Promise<boolean> {
+    signal.throwIfAborted();
+    if (!isTauri()) throw new Error("本机 Agent 需要在桌面应用中使用");
+    if (!projectId) throw new Error("请先保存当前画布，再使用本机 Agent");
+    const [binding] = await inspectCanvasProjectBindings([projectId]);
+    signal.throwIfAborted();
+    if (!binding || binding.projectId !== projectId) throw new Error("未能确认当前画布的目录绑定，请重试");
+    if (binding.state !== "bound" && binding.state !== "unbound") throw new Error(binding.message);
+    let workspace: CanvasProjectWorkspace;
+    if (binding.state === "unbound") {
+        const directory = await selectFilmDirectory();
+        signal.throwIfAborted();
+        if (!directory) return false;
+        workspace = await bindCanvasProjectDirectory(projectId, projectTitle || "未命名片子", directory);
+    } else {
+        workspace = await resolveCanvasProjectWorkspace(projectId, projectTitle);
+    }
+    signal.throwIfAborted();
+    if (!workspace.configured) throw new Error(workspace.configurationError || "片子目录配置未完成，请重试");
+    return true;
+}
+
 export async function bindCanvasProjectDirectory(projectId: string, projectTitle: string, projectDirectory: string): Promise<CanvasProjectWorkspace> {
     if (!isTauri()) {
         return { projectDirectory, configured: false, source: "selected_folder" };

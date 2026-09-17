@@ -346,6 +346,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "dotenvy"
+version = "0.15.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
+
+[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -776,8 +782,10 @@ name = "infinite-canvas-local-api"
 version = "1.0.0"
 dependencies = [
  "axum",
+ "base64",
  "chrono",
  "croner",
+ "dotenvy",
  "futures-util",
  "regex",
  "reqwest",
@@ -1114,6 +1122,7 @@ dependencies = [
  "hyper-util",
  "js-sys",
  "log",
+ "mime_guess",
  "percent-encoding",
  "pin-project-lite",
  "quinn",

@@ -660,6 +660,13 @@ export function mergeCanvasProjects(remoteProjects: CanvasProject[], localProjec
     );
 }
 
+export function acceptDesktopCanvasDocument(project: CanvasProject, revision: string) {
+    if (pendingProjects.has(project.id) || restoringProjects.has(project.id)) throw new Error("当前编辑尚未保存，已保留本机内容。");
+    const next = { ...project, __desktopRevision: revision };
+    useCanvasStore.setState((state) => ({ projects: state.projects.map((current) => current.id === next.id ? next : current) }));
+    saveStatus(project.id, "saved");
+}
+
 function mergeDesktopCanvasProjects(
     desktopProjects: CanvasProject[],
     localProjects: CanvasProject[],

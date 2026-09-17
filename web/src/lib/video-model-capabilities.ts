@@ -51,6 +51,7 @@ export function supportsVideoFrameReferences(modelName: string, protocol = "") {
 
 export function supportsVideoAudioGeneration(modelName: string) {
     const model = modelKey(modelName);
+    if (/seedance-?2-5(?:-|$)/.test(model)) return true;
     if (model.includes("motion-control")) return false;
     return (
         isCogVideoX3Model(model) ||

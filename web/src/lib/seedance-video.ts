@@ -29,6 +29,18 @@ export const seedanceRatioOptions = [
 
 export const seedanceDurationOptions = [-1, 4, 5, 6, 8, 10, 12, 15] as const;
 
+export function isSeedance25Model(model: string) {
+    return /seedance[-_. /]*2[-_.]5(?:\D|$)/i.test(model);
+}
+
+export function seedanceMaxDuration(model: string) {
+    return isSeedance25Model(model) ? 30 : 15;
+}
+
+export function seedanceDurationOptionsForModel(model: string) {
+    return isSeedance25Model(model) ? [...seedanceDurationOptions, 20, 25, 30] : [...seedanceDurationOptions];
+}
+
 const seedancePixels = {
     "480p": {
         "16:9": "864x496",
@@ -103,10 +115,10 @@ export function normalizeResolutionToken(value: string) {
     return `${resolution}p`;
 }
 
-export function normalizeSeedanceDuration(value: string) {
+export function normalizeSeedanceDuration(value: string, model = "") {
     if (String(value).trim() === "-1") return -1;
     const seconds = Math.floor(Number(value) || 5);
-    return Math.max(4, Math.min(15, seconds));
+    return Math.max(4, Math.min(seedanceMaxDuration(model), seconds));
 }
 
 export function normalizeSeedanceRatio(value: string) {

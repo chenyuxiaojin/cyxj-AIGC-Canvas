@@ -27,6 +27,7 @@ import { CanvasTerminalDrawer } from "./canvas-terminal-drawer";
 import { ImageGenerationPending } from "@/components/image-generation-pending";
 import { isTauri } from "@tauri-apps/api/core";
 import { codexContextPercent } from "@/services/canvas-codex";
+import { ensureCanvasAgentWorkspace } from "@/services/desktop-terminal";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { cn } from "@/lib/utils";
 import { resolveCanvasModelReferences } from "@/services/canvas-media";
@@ -149,14 +150,11 @@ export function CanvasAssistantPanel({
         activeSessionIdRef.current = resolvedActiveSessionId;
     }, [resolvedActiveSessionId, sessions]);
 
-    useEffect(
-        () => () => {
-            abortRef.current?.abort();
-            pendingDeleteRef.current?.resolve(false);
-            pendingDeleteRef.current = null;
-        },
-        [],
-    );
+    useEffect(() => () => {
+        abortRef.current?.abort();
+        pendingDeleteRef.current?.resolve(false);
+        pendingDeleteRef.current = null;
+    }, [projectId]);
 
     const activeSession = safeSessions.find((session) => session.id === resolvedActiveSessionId) || safeSessions[0] || null;
     const provider = activeSession?.provider || "api";
@@ -360,6 +358,17 @@ export function CanvasAssistantPanel({
         };
         onAgentRunStart({ batchId, summary: text });
         try {
+            if (provider !== "api") {
+                updateMessage(session.id, assistantId, { activity: "正在确认片子目录；首次使用请选择素材保存的文件夹" });
+                if (!await ensureCanvasAgentWorkspace(projectId, projectTitle, controller.signal)) {
+                    updateMessage(session.id, assistantId, {
+                        text: "已取消选择片子目录，尚未启动 Agent。原文和参考素材已保留，点击重试即可重新选择目录并继续。",
+                        status: "waiting", activity: undefined,
+                    });
+                    return;
+                }
+                updateMessage(session.id, assistantId, { activity: "目录已就绪，正在理解画布和创作目标" });
+            }
             const modelReferences = await resolveCanvasModelReferences(projectId || "", references);
             const runtimeInput = {
                 config: requestConfig,
@@ -370,6 +379,7 @@ export function CanvasAssistantPanel({
                 getContext: getAgentContext,
                 executeAction: async (action: CanvasAgentAction): Promise<CanvasAgentToolResult> => {
                     if (controller.signal.aborted) throw new DOMException("已停止", "AbortError");
+                    if (isTauri() && isCanvasAgentMediaAction(action)) return onExecuteAction(action, messageReferenceNodeIds);
                     const media = provider !== "api" && isCanvasAgentMediaAction(action);
                     const connectionDelete = provider !== "api" && action.name === "delete_connection";
                     if (action.name !== "delete_node" && !media && !connectionDelete) { const result = await onExecuteAction(action, messageReferenceNodeIds); onAgentActionResult({ batchId, action, result }); return result; }
@@ -593,9 +603,9 @@ export function CanvasAssistantPanel({
                             </span> : null}
                         </div>
                         {provider === "api" ? <div className="truncate">{effectiveConfig.textModel || effectiveConfig.model || "尚未配置文本模型"}</div> : null}
-                        {provider === "grok" || provider === "antigravity" ? <div>{activeSession?.localAgentModel || "模型尚未由本机工具报告"} · 使用本机登录 · 当前接入仅文字与节点 · 媒体生成另行确认</div> : null}
+                        {provider === "grok" || provider === "antigravity" ? <div>{activeSession?.localAgentModel || "模型尚未由本机工具报告"} · 使用本机登录 · 文字对话 · 画布生成按项目授权</div> : null}
                         {provider === "codex" ? <>
-                            <div className="truncate">{activeSession?.codexModel || "使用本机 Codex 的 ChatGPT 登录"} · 媒体生成另行确认</div>
+                            <div className="truncate">{activeSession?.codexModel || "使用本机 Codex 的 ChatGPT 登录"} · 画布生成按项目授权</div>
                             {contextPercent !== null && contextPercent >= 70 ? <div role="status" style={{ color: theme.node.text }}>
                                 {contextPercent >= 85 ? "上下文接近上限；Codex 可能进行摘要压缩，重要定稿请保存在节点中。" : "上下文已超过 70%，建议完成当前阶段后新建对话。"}
                             </div> : null}

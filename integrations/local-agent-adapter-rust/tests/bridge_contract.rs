@@ -341,7 +341,7 @@ fn mcp_stdio_lists_tools_and_reads_the_bound_canvas() {
         .collect::<Vec<_>>();
     assert_eq!(responses.len(), 3);
     assert_eq!(responses[0]["result"]["protocolVersion"], "2025-06-18");
-    assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 4);
+    assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 6);
     assert_eq!(
         responses[2]["result"]["structuredContent"]["binding"]["project_id"],
         "project-1"
@@ -350,4 +350,25 @@ fn mcp_stdio_lists_tools_and_reads_the_bound_canvas() {
         responses[2]["result"]["structuredContent"]["canvas"]["node_count"],
         0
     );
+}
+
+#[test]
+fn real_http_transfers_and_command_receipts_are_shared_with_cli() {
+    let fixture = Fixture::new();
+    let client = fixture.client();
+    let bytes:Vec<u8> = (0..2*1024*1024+29).map(|index|(index%251) as u8).collect();
+    let artifact = client.upload("/v1/projects/project-1/transfers", &bytes).unwrap();
+    let id = artifact["data"]["artifact_id"].as_str().unwrap();
+    assert_eq!(client.download(&format!("/v1/projects/project-1/transfers/{id}")).unwrap(), bytes);
+    let request=json!({"project_id":"project-1","request_id":"external-generation","base_revision":fixture.canvas.get_project("project-1").unwrap().revision,"action":"generate_image","arguments":{"prompt":"隔离测试，不调用上游"}});
+    let receipt=client.post("/v1/canvas/commands",&request).unwrap();
+    assert_eq!(receipt["data"]["status"],"pending_approval");
+    assert_eq!(client.post("/v1/canvas/commands",&request).unwrap()["data"]["duplicate"],true);
+    let output=Command::new(cargo_bin("infinite-canvas")).args(["--endpoint",&fixture.endpoint(),"--credential-file",fixture.credentials.path().to_str().unwrap(),"tasks","get","project-1","external-generation"]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let result:Value=serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["data"]["task_id"],"external-generation");
+    assert_eq!(result["data"]["status"],"pending_approval");
+    client.post("/v1/projects/project-1/commands/external-generation/cancel",&json!({})).unwrap();
+    assert_eq!(fixture.canvas.command_status("project-1","external-generation").unwrap()["status"],"cancelled");
 }

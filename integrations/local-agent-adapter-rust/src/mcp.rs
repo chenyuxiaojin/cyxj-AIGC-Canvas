@@ -131,19 +131,20 @@ fn tool_catalog() -> Vec<Value> {
         json!({
             "name": "canvas_mutate",
             "title": "Change canvas safely",
-            "description": "Preview or apply allowlisted canvas operations. Defaults to dry_run. Apply uses the latest canvas revision and an idempotent request id.",
+            "description": "Preview or apply edits to every canvas node type, metadata, groups, connections and project settings. Apply requires the revision you read and a stable request_id; reuse the exact request on transport failure.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "mode": { "type": "string", "enum": ["dry_run", "apply"], "default": "dry_run" },
                     "request_id": { "type": "string" },
+                    "base_revision": { "type": "string", "description": "SHA-256 revision returned by canvas_read/context or dry_run; required for apply." },
                     "operations": {
                         "type": "array",
                         "minItems": 1,
                         "maxItems": 100,
                         "items": {
                             "type": "object",
-                            "description": "One allowlisted operation: create_text_node, move_node, set_node_text, set_project_title, add_connection, or remove_connection."
+                            "description": "create_node {node:{id,type,title,position:{x,y},width,height,metadata}}; update_node {node_id,patch:{title?,position?,width?,height?,metadata?}} (null clears individual metadata fields); delete_node {node_id}; set_group_members {group_id,node_ids}; update_project {patch}; create_text_node; move_node; set_node_text; set_project_title; add_connection; remove_connection. Node types: text,image,panorama,video,audio,config,director,group. Every operation requires its type field."
                         }
                     }
                 },
@@ -154,18 +155,33 @@ fn tool_catalog() -> Vec<Value> {
         }),
         json!({
             "name": "canvas_task",
-            "title": "Inspect or cancel local canvas tasks",
-            "description": "Read the local runtime, inspect a task, or cancel a task created by Infinite Canvas.",
+            "title": "Execute canvas creation tasks",
+            "description": "Submit App actions including generation using configured providers. Open the project with open_project first; the App executes queued work without manual clicks. Paid work uses the user's project authorization or waits for approval. A queued/submitted receipt is not completed media. Query the same task id after interruption; never resubmit paid work with a new id automatically.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "action": { "type": "string", "enum": ["runtime", "status", "cancel"] },
-                    "task_id": { "type": "string" }
+                    "action": { "type": "string", "enum": ["runtime", "list", "submit", "status", "cancel", "local_status", "local_cancel"] },
+                    "task_id": { "type": "string" },
+                    "request_id": { "type": "string" },
+                    "base_revision": { "type": "string" },
+                    "offset": {"type":"integer","minimum":0},
+                    "command": { "type": "string", "enum": crate::commands::ACTIONS },
+                    "arguments": { "type": "object", "description": "Arguments for the selected App action; use get_generation_config to inspect model/channel settings. Generation accepts prompt,title,sourceNodeIds,size,count,seconds,generateAudio,voice,instructions. generate_node: nodeId,mode(text/image/video/audio),prompt; uses that node's full settings. retry_node: nodeId (explicit new attempt). mask_edit_image: nodeId,prompt,artifact_id (marked PNG),model?,channelId?. generate_angle: nodeId,params{horizontalAngle:-60..60,pitchAngle:-60..60,cameraDistance:1..20,wideAngle:boolean}. upscale_image: nodeId,params{targetLongEdge:32..4096,algorithm:high/bilinear/nearest}. replace_media: nodeId,artifact_id,type?,mimeType?,title?. read_media/collect_asset: nodeId. import_media: artifact_id,type(image/panorama/video/audio),mimeType,title,nodeId(optional reference). export_project: {}. import_project: artifact_id. crop_image: nodeId,crop{x,y,width,height} all 0-1. split_image: nodeId,horizontalLines,verticalLines arrays of 0-1. capture_video_frame: nodeId,position(first/last/current),seconds. director_read/director_capture/director_export_video: nodeId,cameraId(optional),seconds(optional timeline position); capture preset: current/four/twelve. Returns actual rendered images or MP4 using existing director, no paid model. arrange_nodes/create_group: nodeIds,title(optional). open_project/undo/redo: {}." }
                 },
                 "required": ["action"],
                 "additionalProperties": false
             },
             "annotations": { "readOnlyHint": false, "destructiveHint": false }
+        }),
+        json!({
+            "name":"canvas_project", "title":"Project and version history", "description":"Create an explicitly named project or inspect/restore this bound project's version history. Creates never overwrite an existing project. Restore requires base_revision and request_id; opening and ZIP transfer use canvas_task.",
+            "inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["create","history","preview","restore"]},"project_id":{"type":"string","description":"Required for create; other actions are scoped to this bound project."},"title":{"type":"string"},"project":{"type":"object"},"sequence":{"type":"integer"},"base_revision":{"type":"string"},"request_id":{"type":"string"}},"required":["action"],"additionalProperties":false},
+            "annotations":{"readOnlyHint":false,"destructiveHint":true}
+        }),
+        json!({
+            "name":"canvas_media","title":"Transfer project media","description":"Upload a file from this bound film directory or download a read_media/export_project artifact to a NEW file inside that directory. Does not invoke a model. Upload returns artifact_id for canvas_task import_media/import_project.",
+            "inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["upload","download"]},"path":{"type":"string","description":"Relative path inside the bound film directory."},"artifact_id":{"type":"string"}},"required":["action","path"],"additionalProperties":false},
+            "annotations":{"readOnlyHint":false,"destructiveHint":false}
         }),
     ]
 }
@@ -186,7 +202,40 @@ fn call_tool(
         "canvas_context" => canvas_context(client, project_directory, project_id, &arguments),
         "canvas_read" => canvas_read(client, project_id, &arguments),
         "canvas_mutate" => canvas_mutate(client, project_id, &arguments),
-        "canvas_task" => canvas_task(client, &arguments),
+        "canvas_task" => canvas_task(client, project_id, &arguments),
+        "canvas_project" => {
+            let id=if arguments["action"]=="create" {arguments["project_id"].as_str().ok_or_else(||BridgeError::invalid("创建项目需要明确 project_id。"))?} else {project_id};
+            validate_identifier(id)?;
+            client.post(&format!("/v1/projects/{id}/actions"),&arguments)
+        }
+        "canvas_media" => {
+            use std::io::{Read,Write};
+            let relative=arguments["path"].as_str().ok_or_else(||BridgeError::invalid("缺少相对路径。"))?;
+            let relative=Path::new(relative);
+            if relative.is_absolute() || relative.components().any(|part|!matches!(part,std::path::Component::Normal(_))) {return Err(BridgeError::forbidden("素材路径必须位于绑定片子目录内。"));}
+            let root=project_directory.canonicalize().map_err(|_|BridgeError::invalid("绑定目录不可用。"))?;
+            let path=root.join(relative);
+            match arguments["action"].as_str() {
+                Some("upload")=>{
+                    let path=path.canonicalize().map_err(|_|BridgeError::not_found("素材文件不存在。"))?;
+                    if !path.starts_with(&root) {return Err(BridgeError::forbidden("素材路径越界。"));}
+                    let mut bytes=Vec::new();
+                    std::fs::File::open(path).and_then(|file|file.take(crate::transfers::MAX_BYTES as u64+1).read_to_end(&mut bytes)).map_err(|_|BridgeError::invalid("无法读取素材文件。"))?;
+                    if bytes.len()>crate::transfers::MAX_BYTES {return Err(BridgeError::invalid("素材超过 512 MiB。"));}
+                    client.upload(&format!("/v1/projects/{project_id}/transfers"),&bytes)
+                }
+                Some("download")=>{
+                    let parent=path.parent().ok_or_else(||BridgeError::invalid("输出路径无效。"))?.canonicalize().map_err(|_|BridgeError::invalid("输出目录不存在。"))?;
+                    if !parent.starts_with(&root) {return Err(BridgeError::forbidden("输出路径越界。"));}
+                    let id=arguments["artifact_id"].as_str().ok_or_else(||BridgeError::invalid("缺少 artifact_id。"))?; validate_identifier(id)?;
+                    let bytes=client.download(&format!("/v1/projects/{project_id}/transfers/{id}"))?;
+                    let mut file=std::fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(|_|BridgeError::invalid("输出文件已存在或无法创建。"))?;
+                    file.write_all(&bytes).map_err(|_|BridgeError::internal("素材写入失败。"))?;
+                    Ok(json!({"ok":true,"artifact_id":id,"bytes":bytes.len(),"path":relative}))
+                }
+                _=>Err(BridgeError::invalid("action 必须为 upload 或 download。"))
+            }
+        }
         _ => Err(BridgeError::not_found(
             "The requested canvas MCP tool does not exist.",
         )),
@@ -321,13 +370,12 @@ fn canvas_mutate(
             "canvas_mutate mode must be dry_run or apply.",
         ));
     }
-    let data = project_data(client, project_id)?;
-    let base_revision = data
-        .get("revision")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            BridgeError::internal("The Agent Bridge did not return a canvas revision.")
-        })?;
+    if mode=="apply" && (arguments["base_revision"].as_str().is_none() || arguments["request_id"].as_str().is_none()) {
+        return Err(BridgeError::invalid("apply 必须携带读取时的 base_revision 和固定 request_id，防止覆盖新编辑或重复操作。"));
+    }
+    let base_revision = if let Some(revision)=arguments["base_revision"].as_str() {revision.to_owned()} else {
+        project_data(client,project_id)?["revision"].as_str().ok_or_else(||BridgeError::internal("缺少画布修订。"))?.to_owned()
+    };
     let request_id = arguments
         .get("request_id")
         .and_then(Value::as_str)
@@ -364,20 +412,37 @@ fn canvas_mutate(
     Ok(response)
 }
 
-fn canvas_task(client: &BridgeClient, arguments: &Value) -> Result<Value, BridgeError> {
+fn canvas_task(client: &BridgeClient, project_id:&str, arguments: &Value) -> Result<Value, BridgeError> {
     let action = arguments
         .get("action")
         .and_then(Value::as_str)
         .ok_or_else(|| BridgeError::invalid("canvas_task requires an action."))?;
     match action {
         "runtime" => client.get("/v1/runtime"),
+        "list" => { let offset=arguments.get("offset").map(|v|v.as_u64().filter(|n| *n <= u32::MAX as u64).ok_or_else(||BridgeError::invalid("offset 必须是非负整数。"))).transpose()?.unwrap_or(0); client.get(&format!("/v1/projects/{project_id}/commands?offset={offset}")) },
+        "submit" => {
+            let request=crate::CanvasCommandRequest {
+                project_id:project_id.to_owned(),
+                request_id:arguments["request_id"].as_str().ok_or_else(||BridgeError::invalid("submit 需要固定 request_id。"))?.to_owned(),
+                base_revision:arguments["base_revision"].as_str().ok_or_else(||BridgeError::invalid("submit 需要读取时的 base_revision。"))?.to_owned(),
+                action:arguments["command"].as_str().ok_or_else(||BridgeError::invalid("缺少 command。"))?.to_owned(),
+                arguments:arguments.get("arguments").cloned().unwrap_or_else(||json!({})),
+            };
+            client.post("/v1/canvas/commands",&request)
+        }
         "status" | "cancel" => {
+            let task_id=arguments["task_id"].as_str().ok_or_else(||BridgeError::invalid("缺少 task_id。"))?;
+            validate_identifier(task_id)?;
+            let path=format!("/v1/projects/{project_id}/commands/{task_id}");
+            if action=="status" {client.get(&path)} else {client.post(&format!("{path}/cancel"),&json!({}))}
+        }
+        "local_status" | "local_cancel" => {
             let task_id = arguments
                 .get("task_id")
                 .and_then(Value::as_str)
                 .ok_or_else(|| BridgeError::invalid("This canvas_task action requires task_id."))?;
             validate_identifier(task_id)?;
-            if action == "status" {
+            if action == "local_status" {
                 client.get(&format!("/v1/tasks/{task_id}"))
             } else {
                 client.post(&format!("/v1/tasks/{task_id}/cancel"), &json!({}))
@@ -512,7 +577,9 @@ mod tests {
                 "canvas_context",
                 "canvas_read",
                 "canvas_mutate",
-                "canvas_task"
+                "canvas_task",
+                "canvas_project"
+                ,"canvas_media"
             ]
         );
     }

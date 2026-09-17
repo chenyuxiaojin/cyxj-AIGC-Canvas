@@ -3,6 +3,10 @@ import { CANVAS_OPERATION_PROTOCOL_VERSION, buildCanvasStructureOperations, cano
 import type { CanvasProject } from "../stores/use-canvas-store";
 import { selectLocalMedia, importLocalMediaPaths, getProjectMediaDirectory, selectProjectMediaDirectory, relinkLocalMediaReference, resolveLocalMediaReference, type LocalMediaRequestEvidence, type LocalMediaImportOutcome, type LocalMediaResolution, type DesktopTaskSnapshot } from "@/services/desktop-runtime";
 
+import { seedanceDurationOptionsForModel, seedanceMaxDuration } from "@/lib/seedance-video";
+import equal from "fast-deep-equal";
+import { executeDirectorCommand } from "@/services/canvas-director-commands";
+
 import { createCanvasDragIndex } from "../utils/canvas-drag-index";
 import { CanvasVersionHistory } from "../components/canvas-version-history";
 import { CanvasSaveStatus } from "../components/canvas-save-status";
@@ -33,7 +37,7 @@ import { UserStatusActions } from "@/components/layout/user-status-actions";
 import { isKIEKlingV3Config, kieKlingOmniVariant } from "@/components/video-settings-panel";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useThemeStore } from "@/stores/use-theme-store";
-import { cropDataUrl, splitDataUrl, upscaleDataUrl } from "../utils/canvas-image-data";
+import { cropDataUrl, splitDataUrl, upscaleDataUrl, MAX_UPSCALE_LONG_EDGE } from "../utils/canvas-image-data";
 import { fitNodeSize, nodeSizeFromRatio } from "../utils/canvas-node-size";
 import { captureVideoFrame, type VideoFramePosition } from "../utils/canvas-video-frame";
 import { PANORAMA_IMAGE_SIZE, PANORAMA_NODE_SIZE, buildPanoramaPrompt, isCanvasImageNodeType, isPanoramaNodeType } from "../utils/canvas-panorama";
@@ -71,8 +75,13 @@ import { CanvasToolbar } from "../components/canvas-toolbar";
 import { AssetPickerModal } from "../components/asset-picker-modal";
 import { CanvasZoomControls } from "../components/canvas-zoom-controls";
 import { CANVAS_ASSET_DRAG_TYPE, CanvasSidePanel } from "../components/canvas-side-panel";
+import { DEFAULT_CANVAS_AGENT_PANEL, DEFAULT_CANVAS_SIDE_PANEL, useCanvasStore, acceptDesktopCanvasDocument } from "../stores/use-canvas-store";
+import { listCanvasCommandHistory, registerCanvasExecutor, readCanvasTransfer, writeCanvasTransfer, readCanvasDocument, submitCanvasCommand, getCanvasCommand, approveCanvasCommand, applyDesktopCanvasOperations, type CanvasCommand, type CanvasDocument, type CanvasExecutor } from "@/services/canvas-commands";
+import { CanvasCommandPermissions } from "../components/canvas-command-permissions";
 import { CanvasSequentialPlayer } from "../components/canvas-sequential-player";
-import { DEFAULT_CANVAS_AGENT_PANEL, DEFAULT_CANVAS_SIDE_PANEL, useCanvasStore } from "../stores/use-canvas-store";
+import { createCanvasArchive } from "../utils/canvas-export";
+import { importCanvasArchive } from "../utils/canvas-import";
+import { normalizeCanvasAgentAction, isCanvasAgentMediaAction } from "../agent/canvas-agent-tools";
 import { assistantReferenceContentFromNode, buildNodeMentionReferences, isCanvasReferenceNode, type CanvasResourceReference } from "../utils/canvas-resource-references";
 import { buildCanvasAgentContext } from "../agent/canvas-agent-context";
 import type { CanvasAgentAction, CanvasAgentToolResult } from "../agent/canvas-agent-tools";
@@ -210,6 +219,7 @@ export default function CanvasPage() {
 
     useEffect(() => {
         if (!hydrated) return;
+        setMounted(false);
         let active = true;
         const prepare = async () => {
             if (isDesktopRuntime()) await refreshFromDesktop().catch(() => undefined);
@@ -217,7 +227,7 @@ export default function CanvasPage() {
         };
         void prepare();
         return () => { active = false; };
-    }, [hydrated, refreshFromDesktop]);
+    }, [hydrated, params.id, refreshFromDesktop]);
 
     if (!mounted) return <CanvasRefreshShell />;
 
@@ -532,8 +542,9 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     useEffect(() => { projectMediaScopeRef.current.adoptReferences(nodes); }, [nodes]);
     const dragIndexRef = useRef(createCanvasDragIndex());
     const nodesRef = useRef(nodes);
+    const manualMediaImportRef = useRef<(files: { blob: Blob; title: string; type: CanvasNodeType; position?: Position }[], sourceNodeId?: string) => Promise<void>>(async () => { throw new Error("画布尚未就绪"); });
+    const externalSnapshotRef = useRef<Record<string, unknown> | null>(null);
     const loadedProjectVersionRef = useRef("");
-    const applyingProjectVersionRef = useRef<string | null>(null);
     const agentExpectedRevisionRef = useRef<number | null>(null);
     const consumedAgentRequestProjectRef = useRef<string | null>(null);
     const connectionsRef = useRef(connections);
@@ -758,11 +769,9 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
 
     useEffect(() => {
         if (!projectLoaded || historyPausedRef.current) return;
-        if (applyingProjectVersionRef.current && currentProject) {
-            const synchronized = buildCanvasStructureOperations(currentProject, nodes, connections).length === 0;
-            if (synchronized) applyingProjectVersionRef.current = null;
-            return;
-        }
+        const patch = { nodes, connections, chatSessions, activeChatId, agentConfig, backgroundMode, showImageInfo };
+        if (externalSnapshotRef.current && Object.entries(patch).every(([key, value]) => externalSnapshotRef.current?.[key] === value)) return;
+        externalSnapshotRef.current = null;
         updateProject(projectId, { nodes, connections, chatSessions, activeChatId, agentConfig, backgroundMode, showImageInfo });
     }, [activeChatId, agentConfig, backgroundMode, chatSessions, connections, currentProject, nodes, projectId, projectLoaded, showImageInfo, updateProject]);
 
@@ -2116,106 +2125,98 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         };
     }, [finishNodeDrag, handleGlobalMouseMove, handleGlobalMouseUp, handleGlobalPointerMove]);
 
-    const appendImportedImageNode = useCallback(
-        (image: UploadedImage, title: string, position: Position, type: CanvasNodeType.Image | CanvasNodeType.Panorama) => {
-            const isPanorama = type === CanvasNodeType.Panorama;
-            const size = isPanorama ? PANORAMA_NODE_SIZE : fitNodeSize(image.width, image.height);
-            const id = type + "-" + Date.now() + "-" + Math.random().toString(36).slice(2, 7);
-            const newNode: CanvasNodeData = {
-                id,
-                type,
-                title,
-                position: { x: position.x - size.width / 2, y: position.y - size.height / 2 },
-                width: size.width,
-                height: size.height,
-                metadata: isPanorama ? { ...imageMetadata(image), size: PANORAMA_IMAGE_SIZE, panoramaProjection: "equirectangular" } : imageMetadata(image),
-            };
-            commitHumanNodeMutation([id], (prev) => [...prev, newNode]);
+    const appendImportedImageNode = useCallback((image: UploadedImage, title: string, position: Position, type: CanvasNodeType.Image | CanvasNodeType.Panorama) => {
+        if (desktopRuntime) {
+            void (async () => { const blob = image.storageKey ? await readCanvasMediaBlob(projectId, image.storageKey, image.mimeType) : await (await fetch(image.url)).blob(); await manualMediaImportRef.current([{ blob, title, type, position }]); })().catch((error) => message.error(String(error)));
+            return;
+        }
+
+        const isPanorama = type === CanvasNodeType.Panorama;
+        const size = isPanorama ? PANORAMA_NODE_SIZE : fitNodeSize(image.width, image.height);
+        const id = type + "-" + Date.now() + "-" + Math.random().toString(36).slice(2, 7);
+        const newNode: CanvasNodeData = {
+            id,
+            type,
+            title,
+            position: { x: position.x - size.width / 2, y: position.y - size.height / 2 },
+            width: size.width,
+            height: size.height,
+            metadata: isPanorama ? { ...imageMetadata(image), size: PANORAMA_IMAGE_SIZE, panoramaProjection: "equirectangular" } : imageMetadata(image),
+        };
+        setNodes((prev) => [...prev, newNode]);
+        setSelectedNodeIds(new Set([id]));
+        setSelectedConnectionId(null);
+        setDialogNodeId(id);
+    }, [desktopRuntime, projectId, message]);
+
+    const createImageFileNode = useCallback(async (file: File, position: Position, choosePanoramaImport = false) => {
+        const hideLoading = message.loading("正在上传图片...", 0);
+        try {
+            const image = await uploadImage(file);
+            if (choosePanoramaImport && image.width === image.height * 2) {
+                setPendingPanoramaImport({ image, title: file.name, position });
+                return;
+            }
+            appendImportedImageNode(image, file.name, position, CanvasNodeType.Image);
+        } catch (error) {
+            console.error("Upload image node failed:", error);
+            message.error("图片上传失败");
+        } finally {
+            hideLoading();
+        }
+    }, [appendImportedImageNode, message]);
+
+    const finishPanoramaImport = useCallback((type: CanvasNodeType.Image | CanvasNodeType.Panorama) => {
+        if (!pendingPanoramaImport) return;
+        setPendingPanoramaImport(null);
+        appendImportedImageNode(pendingPanoramaImport.image, pendingPanoramaImport.title, pendingPanoramaImport.position, type);
+    }, [appendImportedImageNode, pendingPanoramaImport]);
+    const createVideoFileNode = useCallback(async (file: File, position: Position) => {
+        if (desktopRuntime) { try { await manualMediaImportRef.current([{blob: file, title: file.name, type: CanvasNodeType.Video, position}]); } catch (error) { message.error(String(error)); } return; }
+        const hideLoading = message.loading("正在上传视频...", 0);
+        try {
+            const video = await uploadMediaFile(file, "video");
+            const node = buildImportedVideoNode(video, file.name, position);
+            setNodes((prev) => [...prev, node]);
+            setSelectedNodeIds(new Set([node.id]));
+            setSelectedConnectionId(null);
+            setDialogNodeId(node.id);
+        } catch (error) {
+            console.error("Upload video node failed:", error);
+            message.error("视频上传失败");
+        } finally {
+            hideLoading();
+        }
+    }, [desktopRuntime, message]);
+
+    const createAudioFileNode = useCallback(async (file: File, position: Position) => {
+        if (desktopRuntime) { try { await manualMediaImportRef.current([{blob: file, title: file.name, type: CanvasNodeType.Audio, position}]); } catch (error) { message.error(String(error)); } return; }
+        const hideLoading = message.loading("正在上传音频...", 0);
+        try {
+            const audio = await uploadMediaFile(file, "audio");
+            const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Audio];
+            const id = `audio-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+            setNodes((prev) => [
+                ...prev,
+                {
+                    id,
+                    type: CanvasNodeType.Audio,
+                    title: file.name,
+                    position: { x: position.x - spec.width / 2, y: position.y - spec.height / 2 },
+                    width: spec.width,
+                    height: spec.height,
+                    metadata: audioMetadata(audio),
+                },
+            ]);
             setSelectedNodeIds(new Set([id]));
             setSelectedConnectionId(null);
-            setDialogNodeId(id);
-        },
-        [commitHumanNodeMutation],
-    );
-
-    const createImageFileNode = useCallback(
-        async (file: File, position: Position, choosePanoramaImport = false) => {
-            const hideLoading = message.loading("正在添加本机图片…", 0);
-            try {
-                const image = await uploadImage(file);
-                if (choosePanoramaImport && image.width === image.height * 2) {
-                    setPendingPanoramaImport({ image, title: file.name, position });
-                    return;
-                }
-                appendImportedImageNode(image, file.name, position, CanvasNodeType.Image);
-            } catch (error) {
-                console.error("Upload image node failed:", error);
-                message.error("图片添加失败");
-            } finally {
-                hideLoading();
-            }
-        },
-        [appendImportedImageNode, message],
-    );
-
-    const finishPanoramaImport = useCallback(
-        (type: CanvasNodeType.Image | CanvasNodeType.Panorama) => {
-            if (!pendingPanoramaImport) return;
-            setPendingPanoramaImport(null);
-            appendImportedImageNode(pendingPanoramaImport.image, pendingPanoramaImport.title, pendingPanoramaImport.position, type);
-        },
-        [appendImportedImageNode, pendingPanoramaImport],
-    );
-    const createVideoFileNode = useCallback(
-        async (file: File, position: Position) => {
-            const hideLoading = message.loading("正在添加本机视频…", 0);
-            try {
-                const video = await uploadMediaFile(file, "video");
-                const node = buildImportedVideoNode(video, file.name, position);
-                commitHumanNodeMutation([node.id], (prev) => [...prev, node]);
-                setSelectedNodeIds(new Set([node.id]));
-                setSelectedConnectionId(null);
-                setDialogNodeId(node.id);
-            } catch (error) {
-                console.error("Upload video node failed:", error);
-                message.error("视频添加失败");
-            } finally {
-                hideLoading();
-            }
-        },
-        [commitHumanNodeMutation, message],
-    );
-
-    const createAudioFileNode = useCallback(
-        async (file: File, position: Position) => {
-            const hideLoading = message.loading("正在添加本机音频…", 0);
-            try {
-                const audio = await uploadMediaFile(file, "audio");
-                const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Audio];
-                const id = `audio-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-                commitHumanNodeMutation([id], (prev) => [
-                    ...prev,
-                    {
-                        id,
-                        type: CanvasNodeType.Audio,
-                        title: file.name,
-                        position: { x: position.x - spec.width / 2, y: position.y - spec.height / 2 },
-                        width: spec.width,
-                        height: spec.height,
-                        metadata: audioMetadata(audio),
-                    },
-                ]);
-                setSelectedNodeIds(new Set([id]));
-                setSelectedConnectionId(null);
-            } catch (error) {
-                console.error("Upload audio node failed:", error);
-                message.error("音频添加失败");
-            } finally {
-                hideLoading();
-            }
-        },
-        [commitHumanNodeMutation, message],
-    );
+        } catch (error) {
+            console.error("Upload audio node failed:", error);
+            message.error("音频上传失败");
+        } finally {
+            hideLoading();
+        }
+    }, [desktopRuntime, message]);
 
     const createTextNodeFromClipboard = useCallback(
         (text: string) => {
@@ -2537,6 +2538,10 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
 
     const handleDirectorCapturesSent = useCallback(
         async (directorNodeId: string, captures: CanvasDirectorCapture[]) => {
+            if (desktopRuntime) {
+                try { const files = await Promise.all(captures.map(async (capture) => ({blob: await (await fetch(capture.dataUrl)).blob(), title: capture.fileName, type: CanvasNodeType.Image}))); setOpenDirectorNodeId(null); await manualMediaImportRef.current(files, directorNodeId); } catch (error) { message.error(String(error)); }
+                return;
+            }
             const director = nodesRef.current.find((node) => node.id === directorNodeId && node.type === CanvasNodeType.Director);
             if (!director || captures.length === 0) return;
 
@@ -2586,6 +2591,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
 
     const handleDirectorVideoSent = useCallback(
         async (directorNodeId: string, output: CanvasDirectorVideo) => {
+            if (desktopRuntime) { setOpenDirectorNodeId(null); try { await manualMediaImportRef.current([{blob: output.blob, title: output.fileName, type: CanvasNodeType.Video}], directorNodeId); } catch (error) { message.error(String(error)); } return; }
             const director = nodesRef.current.find((node) => node.id === directorNodeId && node.type === CanvasNodeType.Director);
             if (!director) return;
 
@@ -2691,6 +2697,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
             const video = containerRef.current?.querySelector<HTMLVideoElement>(`[data-node-id="${CSS.escape(nodeId)}"] video`);
             if (node?.type !== CanvasNodeType.Video || !node.metadata?.content || !video) return message.error("无法截取该画面，请重试");
             try {
+                if (desktopRuntime) { const blob = await captureVideoFrame(node.metadata.content, position, video.currentTime); await manualMediaImportRef.current([{blob, title: `${node.title || "视频"} 截帧`, type: CanvasNodeType.Image}], nodeId); return; }
                 const image = await uploadImage(await captureVideoFrame(node.metadata.content, position, video.currentTime));
                 const size = fitNodeSize(image.width, image.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
                 const id = nanoid();
@@ -2718,10 +2725,11 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 message.error("无法截取该画面，请重试");
             }
         },
-        [commitHumanNodeMutation, message],
+        [desktopRuntime, message],
     );
 
-    const saveNodeAsset = useCallback(
+
+    const executeSaveNodeAsset = useCallback(
         async (node: CanvasNodeData) => {
             // Global assets receive persistent bytes/keys, never ownership of
             // this project's temporary display URL.
@@ -2814,37 +2822,32 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         [commitHumanNodeMutation, effectiveConfig.model, effectiveConfig.textModel, message],
     );
 
-    const cropImageNode = useCallback(
-        async (node: CanvasNodeData, crop: CanvasImageCropRect) => {
-            if (!node.metadata?.content) return;
-            const cropped = await cropDataUrl(node.metadata.content, crop);
-            const image = await uploadImage(cropped);
-            const width = Math.min(node.width, Math.max(220, image.width));
-            const childId = nanoid();
-            const child: CanvasNodeData = {
-                id: childId,
-                type: CanvasNodeType.Image,
-                title: "Cropped Image",
-                position: { x: node.position.x + node.width + 96, y: node.position.y },
-                width,
-                height: width * (image.height / image.width),
-                metadata: {
-                    ...imageMetadata(image),
-                    prompt: node.metadata?.prompt,
-                },
-            };
-            commitHumanNodeMutation([node.id, childId], (prev) => [...prev, child]);
-            const nextConnections = [...connectionsRef.current, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }];
-            connectionsRef.current = nextConnections;
-            setConnections(nextConnections);
-            setSelectedNodeIds(new Set([childId]));
-            setDialogNodeId(childId);
-            setCropNodeId(null);
-        },
-        [commitHumanNodeMutation],
-    );
+    const executeCropImageNode = useCallback(async (node: CanvasNodeData, crop: CanvasImageCropRect) => {
+        if (!node.metadata?.content) return;
+        const cropped = await cropDataUrl(node.metadata.content, crop);
+        const image = await uploadImage(cropped);
+        const width = Math.min(node.width, Math.max(220, image.width));
+        const childId = nanoid();
+        const child: CanvasNodeData = {
+            id: childId,
+            type: CanvasNodeType.Image,
+            title: "Cropped Image",
+            position: { x: node.position.x + node.width + 96, y: node.position.y },
+            width,
+            height: width * (image.height / image.width),
+            metadata: {
+                ...imageMetadata(image),
+                prompt: node.metadata?.prompt,
+            },
+        };
+        setNodes((prev) => [...prev, child]);
+        setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }]);
+        setSelectedNodeIds(new Set([childId]));
+        setDialogNodeId(childId);
+        setCropNodeId(null);
+    }, []);
 
-    const splitImageNode = useCallback(
+    const executeSplitImageNode = useCallback(
         async (node: CanvasNodeData, params: CanvasImageSplitParams) => {
             if (!node.metadata?.content) return;
             setSplitNodeId(null);
@@ -2917,9 +2920,9 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         [commitHumanNodeMutation, message],
     );
 
-    const maskEditImageNode = useCallback(
-        async (node: CanvasNodeData, payload: CanvasImageMaskEditPayload) => {
-            if (!node.metadata?.content) return;
+    const executeMaskEditImageNode = useCallback(
+        async (node: CanvasNodeData, payload: CanvasImageMaskEditPayload, commandId?: string, beforeSubmit?: () => Promise<void>) => {
+            if (!node.metadata?.content) throw new Error("节点没有可用图片");
             const baseGenerationConfig = buildGenerationConfig(effectiveConfig, node, "image");
             const generationConfig = {
                 ...baseGenerationConfig,
@@ -2931,7 +2934,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
             };
             if (!isAiConfigReady(generationConfig, generationConfig.model)) {
                 openConfigDialog(true);
-                return;
+                throw new Error("请先完成节点的模型配置");
             }
             const userPrompt = payload.prompt.trim();
             const prompt = `参考图中蓝色高亮覆盖区域是需要修改的位置，蓝色只是编辑标记，不要保留在最终图像中。只修改蓝色高亮区域，其他区域的构图、人物、文字、光影和风格保持不变。修改要求：${userPrompt}`;
@@ -2946,7 +2949,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 position: { x: node.position.x + node.width + 96, y: node.position.y },
                 width: node.width,
                 height: node.height,
-                metadata: { prompt, status: NODE_STATUS_LOADING, startedAt: Date.now(), progress: 0, imageTaskId: clientTaskId, ...generationMetadata },
+                metadata: { canvasCommandId: commandId, prompt, status: NODE_STATUS_LOADING, startedAt: Date.now(), progress: 0, imageTaskId: clientTaskId, ...generationMetadata },
             };
             setMaskEditNodeId(null);
             setRunningNodeId(childId);
@@ -2958,6 +2961,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
             setSelectedConnectionId(null);
             setDialogNodeId(childId);
             try {
+                await beforeSubmit?.();
                 const task = await createCanvasImageTask(generationConfig, prompt, [markedReference], { nodeId: childId, sourceId: projectId, clientTaskId });
                 setNodes((prev) => applyCanvasImageTaskUpdate(prev, childId, task, childNode.metadata?.startedAt || Date.now(), { width: node.width, height: node.height }));
                 setConnections((prev) => applyCanvasImageTaskConnections(prev, childId, task));
@@ -2965,6 +2969,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 const errorDetails = error instanceof Error ? error.message : "局部修改失败";
                 message.error(errorDetails);
                 setNodes((prev) => prev.map((item) => (item.id === childId ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails } } : item)));
+                throw error;
             } finally {
                 setRunningNodeId(null);
             }
@@ -2972,50 +2977,45 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         [commitHumanNodeMutation, effectiveConfig, isAiConfigReady, message, openConfigDialog, projectId],
     );
 
-    const upscaleImageNode = useCallback(
-        async (node: CanvasNodeData, params: CanvasImageUpscaleParams) => {
-            if (!node.metadata?.content) return;
-            setUpscaleNodeId(null);
-            const hideLoading = message.loading("正在放大图片...", 0);
-            try {
-                const upscaled = await upscaleDataUrl(node.metadata.content, params);
-                const image = await uploadImage(upscaled);
-                const size = fitNodeSize(image.width, image.height);
-                const childId = nanoid();
-                const child: CanvasNodeData = {
-                    id: childId,
-                    type: CanvasNodeType.Image,
-                    title: "Upscaled Image",
-                    position: { x: node.position.x + node.width + 96, y: node.position.y },
-                    width: size.width,
-                    height: size.height,
-                    metadata: {
-                        ...imageMetadata(image),
-                        prompt: node.metadata?.prompt,
-                    },
-                };
-                commitHumanNodeMutation([node.id, childId], (prev) => [...prev, child]);
-                const nextConnections = [...connectionsRef.current, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }];
-                connectionsRef.current = nextConnections;
-                setConnections(nextConnections);
-                setSelectedNodeIds(new Set([childId]));
-                setDialogNodeId(childId);
-            } catch (error) {
-                message.error(error instanceof Error ? error.message : "图片放大失败");
-            } finally {
-                hideLoading();
-            }
-        },
-        [commitHumanNodeMutation, message],
-    );
+    const executeUpscaleImageNode = useCallback(async (node: CanvasNodeData, params: CanvasImageUpscaleParams) => {
+        if (!node.metadata?.content) return;
+        setUpscaleNodeId(null);
+        const hideLoading = message.loading("正在放大图片...", 0);
+        try {
+            const upscaled = await upscaleDataUrl(node.metadata.content, params);
+            const image = await uploadImage(upscaled);
+            const size = fitNodeSize(image.width, image.height);
+            const childId = nanoid();
+            const child: CanvasNodeData = {
+                id: childId,
+                type: CanvasNodeType.Image,
+                title: "Upscaled Image",
+                position: { x: node.position.x + node.width + 96, y: node.position.y },
+                width: size.width,
+                height: size.height,
+                metadata: {
+                    ...imageMetadata(image),
+                    prompt: node.metadata?.prompt,
+                },
+            };
+            setNodes((prev) => [...prev, child]);
+            setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }]);
+            setSelectedNodeIds(new Set([childId]));
+            setDialogNodeId(childId);
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "图片放大失败");
+        } finally {
+            hideLoading();
+        }
+    }, [message]);
 
-    const generateAngleNode = useCallback(
-        async (node: CanvasNodeData, params: CanvasImageAngleParams) => {
-            if (!node.metadata?.content) return;
+    const executeGenerateAngleNode = useCallback(
+        async (node: CanvasNodeData, params: CanvasImageAngleParams, commandId?: string, beforeSubmit?: () => Promise<void>) => {
+            if (!node.metadata?.content) throw new Error("节点没有可用图片");
             const generationConfig = { ...buildGenerationConfig(effectiveConfig, node, "image"), count: "1" };
             if (!isAiConfigReady(generationConfig, generationConfig.model)) {
                 openConfigDialog(true);
-                return;
+                throw new Error("请先完成节点的模型配置");
             }
             const childId = nanoid();
             const imageConfig = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
@@ -3036,7 +3036,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                     position: { x: node.position.x + node.width + 96, y: node.position.y },
                     width: imageConfig.width,
                     height: imageConfig.height,
-                    metadata: { prompt, status: NODE_STATUS_LOADING, imageTaskId: clientTaskId, startedAt, progress: 0, ...generationMetadata },
+                    metadata: { canvasCommandId: commandId, prompt, status: NODE_STATUS_LOADING, imageTaskId: clientTaskId, startedAt, progress: 0, ...generationMetadata },
                 },
             ]);
             const nextConnections = [...connectionsRef.current, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }];
@@ -3045,12 +3045,14 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
             setSelectedNodeIds(new Set([childId]));
             setDialogNodeId(childId);
             try {
+                await beforeSubmit?.();
                 const task = await createCanvasImageTask(generationConfig, prompt, referenceImages, { nodeId: childId, sourceId: projectId, clientTaskId });
                 setNodes((prev) => applyCanvasImageTaskUpdate(prev, childId, task, startedAt, { width: imageConfig.width, height: imageConfig.height }));
                 setConnections((prev) => applyCanvasImageTaskConnections(prev, childId, task));
             } catch (error) {
                 const errorDetails = error instanceof Error ? error.message : "生成失败";
                 setNodes((prev) => prev.map((item) => (item.id === childId ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails } } : item)));
+                throw error;
             } finally {
                 setRunningNodeId(null);
             }
@@ -3273,125 +3275,6 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         [commitHumanNodeMutation, message],
     );
 
-    const handleImageInputChange = useCallback(
-        async (event: ReactChangeEvent<HTMLInputElement>) => {
-            const file = event.target.files?.[0];
-            const target = uploadTargetRef.current;
-            if (!file || (!file.type.startsWith("image/") && !file.type.startsWith("video/") && !isAudioFile(file))) return;
-            const targetNode = target?.nodeId ? nodesRef.current.find((node) => node.id === target.nodeId) : null;
-            if (isPanoramaNodeType(targetNode?.type) && !file.type.startsWith("image/")) {
-                message.warning("全景图节点仅支持选择本机图片作为参考");
-                uploadTargetRef.current = null;
-                event.target.value = "";
-                return;
-            }
-
-            if (target?.nodeId) {
-                const hideLoading = message.loading(isAudioFile(file) ? "正在添加本机音频…" : file.type.startsWith("video/") ? "正在添加本机视频…" : "正在添加本机图片…", 0);
-                try {
-                    if (isAudioFile(file)) {
-                        const audio = await uploadMediaFile(file, "audio");
-                        const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Audio];
-                        commitHumanNodeMutation([target.nodeId], (prev) =>
-                            prev.map((node) =>
-                                node.id === target.nodeId
-                                    ? {
-                                          ...node,
-                                          type: CanvasNodeType.Audio,
-                                          title: file.name,
-                                          position: { x: node.position.x + node.width / 2 - spec.width / 2, y: node.position.y + node.height / 2 - spec.height / 2 },
-                                          width: spec.width,
-                                          height: spec.height,
-                                          metadata: { ...node.metadata, ...audioMetadata(audio), errorDetails: undefined },
-                                      }
-                                    : node,
-                            ),
-                        );
-                        setSelectedNodeIds(new Set([target.nodeId]));
-                        setSelectedConnectionId(null);
-                    } else if (file.type.startsWith("video/")) {
-                        const video = await uploadMediaFile(file, "video");
-                        const nextSize = fitNodeSize(video.width || 1280, video.height || 720, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
-                        commitHumanNodeMutation([target.nodeId], (prev) =>
-                            prev.map((node) =>
-                                node.id === target.nodeId
-                                    ? {
-                                          ...node,
-                                          type: CanvasNodeType.Video,
-                                          title: file.name,
-                                          position: { x: node.position.x + node.width / 2 - nextSize.width / 2, y: node.position.y + node.height / 2 - nextSize.height / 2 },
-                                          width: nextSize.width,
-                                          height: nextSize.height,
-                                          metadata: { ...node.metadata, ...videoMetadata(video), errorDetails: undefined },
-                                      }
-                                    : node,
-                            ),
-                        );
-                        setSelectedNodeIds(new Set([target.nodeId]));
-                        setSelectedConnectionId(null);
-                        setDialogNodeId(target.nodeId);
-                    } else {
-                        const image = await uploadImage(file);
-                        const size = fitNodeSize(image.width, image.height);
-                        commitHumanNodeMutation([target.nodeId], (prev) =>
-                            prev.map((node) => {
-                                if (node.id !== target.nodeId) return node;
-                                const isPanorama = isPanoramaNodeType(node.type);
-                                const nextSize = isPanorama ? PANORAMA_NODE_SIZE : size;
-                                return {
-                                    ...node,
-                                    type: isPanorama ? CanvasNodeType.Panorama : CanvasNodeType.Image,
-                                    title: isPanorama ? node.title : file.name,
-                                    position: isPanorama ? { x: node.position.x + node.width / 2 - nextSize.width / 2, y: node.position.y + node.height / 2 - nextSize.height / 2 } : node.position,
-                                    width: nextSize.width,
-                                    height: nextSize.height,
-                                    metadata: {
-                                        ...node.metadata,
-                                        ...imageMetadata(image),
-                                        errorDetails: undefined,
-                                        freeResize: false,
-                                        isBatchRoot: undefined,
-                                        batchRootId: undefined,
-                                        batchChildIds: undefined,
-                                        batchUsesReferenceImages: undefined,
-                                        generationType: undefined,
-                                        model: isPanorama ? node.metadata?.model : undefined,
-                                        size: isPanorama ? PANORAMA_IMAGE_SIZE : undefined,
-                                        quality: isPanorama ? node.metadata?.quality : undefined,
-                                        count: isPanorama ? node.metadata?.count : undefined,
-                                        references: undefined,
-                                        primaryImageId: undefined,
-                                        imageBatchExpanded: undefined,
-                                        imageTaskId: undefined,
-                                        imageTaskResultId: undefined,
-                                        panoramaSourcePrompt: isPanorama ? node.metadata?.panoramaSourcePrompt : undefined,
-                                        panoramaFinalPrompt: undefined,
-                                        panoramaProjection: undefined,
-                                    },
-                                };
-                            }),
-                        );
-                        setSelectedNodeIds(new Set([target.nodeId]));
-                        setSelectedConnectionId(null);
-                        setDialogNodeId(target.nodeId);
-                    }
-                } catch (error) {
-                    console.error("Upload node file failed:", error);
-                    message.error("本机素材添加失败");
-                } finally {
-                    hideLoading();
-                }
-            } else {
-                const position = target?.position || screenToCanvas((containerRef.current?.getBoundingClientRect().left || 0) + size.width / 2, (containerRef.current?.getBoundingClientRect().top || 0) + size.height / 2);
-                void (isAudioFile(file) ? createAudioFileNode(file, position) : file.type.startsWith("video/") ? createVideoFileNode(file, position) : createImageFileNode(file, position, true));
-            }
-
-            uploadTargetRef.current = null;
-            event.target.value = "";
-        },
-        [commitHumanNodeMutation, createAudioFileNode, createImageFileNode, createVideoFileNode, screenToCanvas, size.height, size.width],
-    );
-
     function insertAssetAt(payload: InsertAssetPayload, position?: Position, nodeId?: string) {
         const center = position || screenToCanvas((containerRef.current?.getBoundingClientRect().left || 0) + size.width / 2, (containerRef.current?.getBoundingClientRect().top || 0) + size.height / 2);
         if (payload.kind === "text") {
@@ -3497,7 +3380,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         setContextMenu(null);
     }, []);
 
-    const handleGenerateNode = useCallback(
+    const executeGenerateNode = useCallback(
         async (nodeId: string, mode: CanvasNodeGenerationMode, prompt: string) => {
             const sourceNode = nodesRef.current.find((node) => node.id === nodeId);
             const generationConfig = buildGenerationConfig(effectiveConfig, sourceNode, mode);
@@ -3506,7 +3389,6 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 return;
             }
 
-            setRunningNodeId(nodeId);
             const sourceTextContent = sourceNode?.type === CanvasNodeType.Text ? sourceNode.metadata?.content?.trim() || "" : "";
             const editingTextNode = mode === "text" && Boolean(sourceTextContent);
             const generationContext = await hydrateNodeGenerationContext(
@@ -3517,9 +3399,9 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
             const markSourceStatus = !isCanvasImageNodeType(sourceNode?.type) && !editingTextNode;
             const statusPrompt = sourceNode?.type === CanvasNodeType.Config ? effectivePrompt : prompt;
             if (!effectivePrompt && (mode === "text" || mode === "audio")) {
-                setRunningNodeId(null);
-                return;
+                throw new Error("请先填写生成内容");
             }
+            setRunningNodeId(nodeId);
             let pendingChildIds: string[] = [];
             const generationStartedAt = Date.now();
             if (markSourceStatus)
@@ -4026,6 +3908,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 setNodes((prev) =>
                     prev.map((node) => (node.id === nodeId || pendingChildIds.includes(node.id) ? (node.id === nodeId && !markSourceStatus ? node : { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails } }) : node)),
                 );
+                throw error;
             } finally {
                 setRunningNodeId(null);
             }
@@ -4250,7 +4133,8 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 if (action.name === "get_canvas_summary") {
                     return {
                         ok: true,
-                        project: { id: projectId, title: currentProject?.title || "未命名画布", revision: useCanvasStore.getState().openProject(projectId)?.operationState.revision || 0 },
+                        project: { id: projectId, title: currentProject?.title || "未命名画布" },
+                        revision: useCanvasStore.getState().projects.find((project) => project.id === projectId)?.__desktopRevision,
                         selectedNodeIds: Array.from(selectedNodeIdsRef.current),
                         nodes: nodesRef.current.slice(0, 120).map(summarizeNode),
                         connections: connectionsRef.current.slice(0, 240),
@@ -4519,6 +4403,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
 
                     const prompt = stringValue("prompt");
                     const metadata: CanvasNodeMetadata = {
+                        canvasCommandId: action.id,
                         prompt,
                         excludeUpstreamText: true,
                         status: "idle",
@@ -4571,32 +4456,10 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                     if (committed.error) return committed.error;
                     selectOnly(node.id);
 
-                    if (committed.outcome.result.duplicate) {
-                        const existingNode = getNode(node.id) || node;
-                        return {
-                            ok: true,
-                            duplicate: true,
-                            nodeId: node.id,
-                            createdNodeIds: [node.id],
-                            connectionIds: createdConnections.map((connection) => connection.id),
-                            ...canvasAgentTaskSummary(existingNode),
-                        };
-                    }
-
-                    if (!resolvedAgentConfig.autoGenerateMedia) {
-                        return {
-                            ok: true,
-                            message: "媒体节点已创建并完成参数配置，尚未提交生成",
-                            submitted: false,
-                            nodeId: node.id,
-                            createdNodeIds: [node.id],
-                            connectionIds: createdConnections.map((connection) => connection.id),
-                            type: node.type,
-                            status: "idle",
-                        };
-                    }
-
-                    await handleGenerateNode(node.id, mode, prompt);
+                    // Save the request/node association before the upstream submission.
+                    updateProject(projectId, { nodes: nodesRef.current, connections: connectionsRef.current });
+                    await useCanvasStore.getState().retrySave(projectId);
+                    await executeGenerateNode(node.id, mode, prompt);
                     await new Promise<void>((resolve) => setTimeout(resolve, 0));
                     const generatedNode = getNode(node.id) || node;
                     const createdNodeIds = [
@@ -4630,36 +4493,47 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 return { ok: false, code: "tool_error", message: error instanceof Error ? error.message : "画布工具执行失败" };
             }
         },
-        [agentEffectiveConfig, applyOperationBatch, chatSessions, cleanupCanvasFiles, currentProject?.title, deleteCanvasTaskRecords, getCanvasCenter, handleGenerateNode, isAiConfigReady, projectId, renameProject, resolvedAgentConfig.autoGenerateMedia, updateProject],
+        [agentEffectiveConfig, createGroupFromSelection, currentProject?.title, deleteConnection, deleteNodes, getCanvasCenter, executeGenerateNode, isAiConfigReady, projectId, renameProject, updateProject],
     );
 
-    const runLocalCollaborationDemo = useCallback(async () => {
-        if (activeAgentBatchRef.current) {
-            message.warning("已有 Agent 批次正在执行，请等待完成后再运行演示");
-            return;
+    const flushCanvasForAgent = useCallback(async () => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        const current = useCanvasStore.getState().projects.find((project) => project.id === projectId);
+        if (!current) throw new Error("画布不存在");
+        if (!equal(current.nodes, nodesRef.current) || !equal(current.connections, connectionsRef.current)) {
+            updateProject(projectId, { nodes: nodesRef.current, connections: connectionsRef.current });
         }
-        const batchId = `local-demo-${nanoid()}`;
-        startCanvasAgentBatch({ batchId, summary: "零付费本地演示：创建可编辑文本节点" });
-        try {
-            const action: CanvasAgentAction = {
-                id: nanoid(),
-                name: "create_text_node",
-                arguments: {
-                    title: "Agent 协作演示",
-                    content: "这是本地创建的可编辑节点。你可以锁定、拖拽或修改文字，再检查 revision 冲突与批次撤销。",
-                    sourceNodeIds: [],
-                },
-            };
-            const result = await executeCanvasAgentAction(action, []);
-            noteCanvasAgentActionResult({ batchId, action, result });
-            finishCanvasAgentBatch({ batchId, ...(result.ok ? {} : { error: result.message || "本地演示失败" }) });
-        } catch (error) {
-            finishCanvasAgentBatch({ batchId, error: error instanceof Error ? error.message : "本地演示失败" });
-        }
-    }, [executeCanvasAgentAction, finishCanvasAgentBatch, message, noteCanvasAgentActionResult, startCanvasAgentBatch]);
+        await useCanvasStore.getState().retrySave(projectId);
+    }, [projectId, updateProject]);
 
-    const handleRetryNode = useCallback(
-        async (node: CanvasNodeData) => {
+    const syncCanvasDocument = useCallback(async (document: CanvasDocument) => {
+        if (document.project.id !== projectId) throw new Error("画布编号不匹配");
+        const project = document.project;
+        const local = useCanvasStore.getState().projects.find((item) => item.id === projectId);
+        if (local && (!equal(local.nodes, nodesRef.current) || !equal(local.connections, connectionsRef.current))) throw new Error("画布有尚未保存的编辑，已保留当前内容");
+        acceptDesktopCanvasDocument(project, document.revision);
+        historyRef.current.past = [...historyRef.current.past.slice(-49), createHistoryEntry()];
+        historyRef.current.future = [];
+        const snapshot = {
+            nodes: project.nodes, connections: project.connections,
+            chatSessions: project.chatSessions || [], activeChatId: project.activeChatId || null,
+            agentConfig: project.agentConfig || null, backgroundMode: project.backgroundMode || "lines", showImageInfo: Boolean(project.showImageInfo),
+        };
+        externalSnapshotRef.current = snapshot;
+        nodesRef.current = snapshot.nodes; connectionsRef.current = snapshot.connections;
+        setNodes(snapshot.nodes); setConnections(snapshot.connections);
+        setChatSessions(snapshot.chatSessions); setActiveChatId(snapshot.activeChatId); setAgentConfig(snapshot.agentConfig);
+        setBackgroundMode(snapshot.backgroundMode); setShowImageInfo(snapshot.showImageInfo);
+        if (project.viewport) { viewportRef.current = project.viewport; setViewport(project.viewport); }
+        if (project.sidePanel) setSidePanel(project.sidePanel);
+        if (project.agentPanel) setAgentPanel(project.agentPanel);
+        setSelectedNodeIds((selected) => new Set([...selected].filter((id) => snapshot.nodes.some((node) => node.id === id))));
+        lastHistoryRef.current = { nodes: snapshot.nodes, connections: snapshot.connections, backgroundMode: snapshot.backgroundMode, showImageInfo: snapshot.showImageInfo };
+        setHistoryState({ canUndo: true, canRedo: false });
+    }, [createHistoryEntry, projectId]);
+
+    const executeRetryNode = useCallback(
+        async (node: CanvasNodeData, commandId?: string, beforeSubmit?: () => Promise<void>) => {
             const sourceNode = findRetrySourceNode(node.id, nodesRef.current, connectionsRef.current) || node;
             const isPanorama = isPanoramaNodeType(node.type);
             const batchRoot = node.metadata?.batchRootId ? nodesRef.current.find((item) => item.id === node.metadata?.batchRootId) : null;
@@ -4679,15 +4553,14 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                     : { ...buildGenerationConfig(effectiveConfig, sourceNode, node.type === CanvasNodeType.Text ? "text" : node.type === CanvasNodeType.Video ? "video" : node.type === CanvasNodeType.Audio ? "audio" : "image"), count: "1" };
             if (!isAiConfigReady(generationConfig, generationConfig.model)) {
                 openConfigDialog(true);
-                return;
+                throw new Error("请先完成节点的模型配置");
             }
 
             const context = hasSavedImageMetadata ? null : await hydrateNodeGenerationContext(buildNodeGenerationContext(sourceNode.id, nodesRef.current, connectionsRef.current, sourceNode.metadata?.prompt || node.metadata?.prompt || ""));
             const prompt = (isPanorama ? savedImageMetadata?.panoramaFinalPrompt || "" : savedImageMetadata?.prompt || context?.prompt || "").trim();
             const requestPrompt = isPanorama ? prompt : applyCameraPrompt(prompt, savedImageMetadata?.cameraControl || node.metadata?.cameraControl);
             if (!prompt) {
-                message.warning("找不到提示词，无法重试");
-                return;
+                throw new Error("找不到提示词，无法重试");
             }
             const generationType = savedImageMetadata?.generationType;
             const useReferenceImages = generationType ? generationType === "edit" : Boolean(context?.referenceImages.length);
@@ -4696,38 +4569,20 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
             if (useReferenceImages && !retryReferenceImages) {
                 message.error("参考图片已丢失，无法继续重试");
                 setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails: "参考图片已丢失，无法继续重试" } } : item)));
-                return;
+                throw new Error("参考图片已丢失，无法继续重试");
             }
             const retryImages = retryReferenceImages || [];
 
             setRunningNodeId(node.id);
             const retryStartedAt = Date.now();
-            const retryVideoTaskId = node.type === CanvasNodeType.Video ? `client_video_task_${node.id}` : "";
-            const retryImageTaskId = isCanvasImageNodeType(node.type) ? `client_image_task_${node.id}` : "";
-            const retryAudioTaskId = node.type === CanvasNodeType.Audio ? `client_audio_task_${node.id}` : "";
-            setNodes((prev) =>
-                prev.map((item) =>
-                    item.id === node.id
-                        ? {
-                              ...item,
-                              metadata: {
-                                  ...item.metadata,
-                                  status: NODE_STATUS_LOADING,
-                                  errorDetails: undefined,
-                                  content: undefined,
-                                  storageKey: "",
-                                  progress: 0,
-                                  startedAt: retryStartedAt,
-                                  ...(item.type === CanvasNodeType.Video ? { videoTaskId: retryVideoTaskId, videoTaskVideoId: undefined } : {}),
-                                  ...(isCanvasImageNodeType(item.type) ? { imageTaskId: retryImageTaskId, imageTaskResultId: undefined } : {}),
-                                  ...(item.type === CanvasNodeType.Audio ? { audioTaskId: retryAudioTaskId, audioTaskResultId: undefined } : {}),
-                              },
-                          }
-                        : item,
-                ),
-            );
+            const attempt = commandId ? Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(commandId)))).map((byte) => byte.toString(16).padStart(2, "0")).join("") : nanoid();
+            const retryVideoTaskId = node.type === CanvasNodeType.Video ? `client_video_task_${attempt}` : "";
+            const retryImageTaskId = isCanvasImageNodeType(node.type) ? `client_image_task_${attempt}` : "";
+            const retryAudioTaskId = node.type === CanvasNodeType.Audio ? `client_audio_task_${attempt}` : "";
+            setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, canvasCommandId: commandId, status: NODE_STATUS_LOADING, errorDetails: undefined, content: undefined, storageKey: "", progress: 0, startedAt: retryStartedAt, ...(item.type === CanvasNodeType.Video ? { videoTaskId: retryVideoTaskId, videoTaskVideoId: undefined } : {}), ...(isCanvasImageNodeType(item.type) ? { imageTaskId: retryImageTaskId, imageTaskResultId: undefined } : {}), ...(item.type === CanvasNodeType.Audio ? { audioTaskId: retryAudioTaskId, audioTaskResultId: undefined } : {}) } } : item)));
 
             try {
+                await beforeSubmit?.();
                 if (node.type === CanvasNodeType.Text) {
                     if (!context) return;
                     let streamed = "";
@@ -4815,6 +4670,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 const errorDetails = error instanceof Error ? error.message : "生成失败";
                 message.error(errorDetails);
                 setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails } } : item)));
+                throw error;
             } finally {
                 setRunningNodeId(null);
             }
@@ -4822,8 +4678,513 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         [effectiveConfig, message, openConfigDialog, projectId],
     );
 
-    // 稳定身份包装：同上，作为 CanvasNode prop 不能用内联箭头函数
-    const handleNodeRetry = useCallback((node: CanvasNodeData) => void handleRetryNode(node), [handleRetryNode]);
+    const executeCanonicalAgentEdit = useCallback(async (action: CanvasAgentAction): Promise<CanvasAgentToolResult | null> => {
+        if (!["create_primary_script_node", "create_text_node", "update_text_node", "update_node", "delete_node", "create_connection", "delete_connection", "create_group", "arrange_nodes"].includes(action.name)) return null;
+        await flushCanvasForAgent();
+        const document = await readCanvasDocument(projectId);
+        const args = action.arguments;
+        const operations: Record<string, unknown>[] = [];
+        const result: CanvasAgentToolResult = { ok: true };
+        const find = (id: string) => { const node = document.project.nodes.find((node) => node.id === id); if (!node) throw new Error(`找不到节点 ${id}`); return node; };
+        const ids = (value: unknown) => Array.isArray(value) ? value.map(String) : [];
+        if (action.name === "create_text_node" || action.name === "create_primary_script_node") {
+            const sources = ids(args.sourceNodeIds).map(find);
+            const center = sources.length ? { x: Math.max(...sources.map((node) => node.position.x + node.width)) + 320, y: Math.min(...sources.map((node) => node.position.y)) + 200 } : getCanvasCenter();
+            const node = createCanvasNode(CanvasNodeType.Text, center, { content: String(args.content || ""), prompt: String(args.content || ""), status: "success" });
+            if (action.name === "create_primary_script_node") Object.assign(node, AGENT_PRIMARY_SCRIPT_NODE_SIZE);
+            node.title = String(args.title || args.content || "文本").slice(0, 120);
+            operations.push({ type: "create_node", node });
+            const edges = sources.map((source) => ({ type: "add_connection", connection_id: nanoid(), from_node_id: source.id, to_node_id: node.id }));
+            operations.push(...edges); Object.assign(result, { nodeId: node.id, node: canvasAgentNodeSummary(node), connectionIds: edges.map((edge) => edge.connection_id) });
+            if (action.name === "create_primary_script_node" && document.project.autoTitlePending && args.projectTitle) operations.push({ type: "update_project", patch: { title: String(args.projectTitle), autoTitlePending: false } });
+        } else if (action.name === "update_text_node" || action.name === "update_node") {
+            const node = find(String(args.nodeId));
+            if (action.name === "update_text_node" && node.type !== CanvasNodeType.Text) throw new Error("目标必须是文字节点");
+            const patch = { ...(args.title ? { title: args.title } : {}), ...(action.name === "update_text_node" && typeof args.content === "string" ? { metadata: { content: args.content, prompt: args.content, status: "success", errorDetails: null } } : {}) };
+            operations.push({ type: "update_node", node_id: node.id, patch }); result.nodeId = node.id;
+        } else if (action.name === "delete_node") {
+            operations.push({ type: "delete_node", node_id: String(args.nodeId) }); result.deletedNodeIds = [String(args.nodeId)];
+        } else if (action.name === "create_connection") {
+            const previous = document.project.connections.find((edge) => edge.fromNodeId === args.fromNodeId && edge.toNodeId === args.toNodeId);
+            if (previous) return { ok: true, connectionId: previous.id, alreadyExists: true };
+            const id = nanoid(); operations.push({ type: "add_connection", connection_id: id, from_node_id: args.fromNodeId, to_node_id: args.toNodeId }); result.connectionId = id;
+        } else if (action.name === "delete_connection") {
+            operations.push({ type: "remove_connection", connection_id: args.connectionId }); result.deletedConnectionId = String(args.connectionId);
+        } else if (action.name === "create_group") {
+            const members = ids(args.nodeIds).map(find);
+            if (members.length < 2 || members.some((node) => node.type === CanvasNodeType.Group || node.metadata?.groupId)) throw new Error("分组至少需要两个未分组的普通节点");
+            const bounds = getNodeBounds(members);
+            const group = createCanvasNode(CanvasNodeType.Group, { x: 0, y: 0 });
+            Object.assign(group, { title: String(args.title || "分组"), position: { x: bounds.left - GROUP_PADDING, y: bounds.top - GROUP_PADDING }, width: bounds.right - bounds.left + GROUP_PADDING * 2, height: bounds.bottom - bounds.top + GROUP_PADDING * 2 });
+            operations.push({ type: "create_node", node: group }, { type: "set_group_members", group_id: group.id, node_ids: members.map((node) => node.id) }); Object.assign(result, { groupId: group.id, nodeIds: members.map((node) => node.id) });
+        } else {
+            const requested = ids(args.nodeIds);
+            const nodes = requested.length ? requested.map(find) : document.project.nodes.filter((node) => !node.metadata?.groupId && !node.metadata?.batchRootId);
+            const selected = new Set(nodes.map((node) => node.id));
+            const roots = nodes.filter((node) => !node.metadata?.groupId || !selected.has(node.metadata.groupId));
+            if (!roots.length) return { ok: true, arrangedNodeIds: [] };
+            const left = Math.min(...roots.map((node) => node.position.x));
+            let x = left, y = Math.min(...roots.map((node) => node.position.y)), rowHeight = 0;
+            roots.forEach((node, index) => { if (index && index % 4 === 0) { x = left; y += rowHeight + 72; rowHeight = 0; } operations.push({ type: "move_node", node_id: node.id, position: { x, y } }); x += node.width + 72; rowHeight = Math.max(rowHeight, node.height); });
+            result.arrangedNodeIds = roots.map((node) => node.id);
+        }
+        const saved = await applyDesktopCanvasOperations({ project_id: projectId, request_id: `${action.id}-edit`, base_revision: document.revision, actor: "agent", operations });
+        await syncCanvasDocument(saved);
+        if (result.nodeId) result.node = canvasAgentNodeSummary(saved.project.nodes.find((node) => node.id === result.nodeId)!);
+        return { ...result, revision: saved.revision };
+    }, [flushCanvasForAgent, getCanvasCenter, projectId, syncCanvasDocument]);
+
+    const executeCanvasCommand = useCallback(async (command: CanvasCommand): Promise<Record<string, unknown>> => {
+        const { action, arguments: args } = command.request;
+        const source = nodesRef.current.find((node) => node.id === args.nodeId);
+        const requireSource = () => { if (!source) throw new Error("找不到指定节点"); return source; };
+        const sourceBlob = async () => {
+            const node = requireSource();
+            const key = node.metadata?.storageKey || localCanvasImageKey(node.metadata);
+            if (key) return readCanvasMediaBlob(projectId, key, node.metadata?.mimeType);
+            if (!node.metadata?.content) throw new Error("节点没有可读取的素材");
+            const response = await fetch(node.metadata.content);
+            if (!response.ok) throw new Error("无法读取节点原素材");
+            return response.blob();
+        };
+        const addFile = async (blob: Blob, title: string, type: CanvasNodeType, offset = 0) => {
+            const stored = isCanvasImageNodeType(type) ? await uploadImage(blob) : await uploadMediaFile(blob, type);
+            const position = typeof args.position === "object" ? args.position as Position : undefined;
+            if (position && ![position.x, position.y].every((value) => typeof value === "number" && Number.isFinite(value))) throw new Error("素材位置无效");
+            const center = position || (source ? { x: source.position.x + source.width + 250, y: source.position.y + 200 + offset } : getCanvasCenter());
+            const metadata = isCanvasImageNodeType(type) ? imageMetadata(stored as UploadedImage) : type === CanvasNodeType.Video ? videoMetadata(stored) : audioMetadata(stored);
+            const nextSize = type === CanvasNodeType.Audio ? NODE_DEFAULT_SIZE[CanvasNodeType.Audio] : type === CanvasNodeType.Panorama ? PANORAMA_NODE_SIZE : fitNodeSize(metadata.naturalWidth || 1280, metadata.naturalHeight || 720);
+            const node = createCanvasNode(type, center, { ...metadata, ...(type === CanvasNodeType.Panorama ? { size: PANORAMA_IMAGE_SIZE, panoramaProjection: "equirectangular" as const } : {}), canvasCommandId: command.task_id });
+            Object.assign(node, nextSize, { title, position: { x: center.x - nextSize.width / 2, y: center.y - nextSize.height / 2 } });
+            nodesRef.current = [...nodesRef.current, node]; setNodes(nodesRef.current);
+            setSelectedNodeIds(new Set([node.id])); setSelectedConnectionId(null);
+            if (source) { connectionsRef.current = [...connectionsRef.current, { id: nanoid(), fromNodeId: source.id, toNodeId: node.id }]; setConnections(connectionsRef.current); }
+            return node.id;
+        };
+        if (["director_read", "director_capture", "director_export_video"].includes(action)) {
+            const node = requireSource();
+            if (node.type !== CanvasNodeType.Director) throw new Error("目标必须是导演台节点");
+            setOpenDirectorNodeId(node.id);
+            try {
+            const output = await executeDirectorCommand(node.id, command.task_id, action, args);
+            if (!output.ok) throw new Error(output.message || "导演台执行失败");
+            if (output.project) { nodesRef.current = nodesRef.current.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, directorProject: output.project } } : item); setNodes(nodesRef.current); }
+            const nodeIds: string[] = [];
+            for (const capture of output.captures || []) nodeIds.push(await addFile(await (await fetch(capture.dataUrl)).blob(), capture.label || "导演台截图", CanvasNodeType.Image, nodeIds.length * 440));
+            if (output.video?.blob) nodeIds.push(await addFile(output.video.blob, output.video.fileName || "导演台视频", CanvasNodeType.Video));
+            return { ok: true, nodeIds, ...(action === "director_read" ? { directorProject: output.project } : {}) };
+            } finally { setOpenDirectorNodeId(null); }
+        }
+        if (action === "undo" || action === "redo") {
+            const available = action === "undo" ? historyRef.current.past.length : historyRef.current.future.length;
+            if (!available) return { ok: false, code: "NO_HISTORY", message: "没有可用的操作历史；跨重启恢复请使用项目版本接口" };
+            if (action === "undo") undoCanvas(); else redoCanvas();
+            return { ok: true };
+        }
+        if (action === "export_project") {
+            const project = useCanvasStore.getState().projects.find((project) => project.id === projectId)!;
+            return { ok: true, ...await writeCanvasTransfer(projectId, await createCanvasArchive([project])), mimeType: "application/zip" };
+        }
+        if (action === "import_project") {
+            const bytes = await readCanvasTransfer(projectId, String(args.artifact_id || ""));
+            const projects = await importCanvasArchive(new Blob([bytes], { type: "application/zip" }));
+            const ids = projects.map((project) => useCanvasStore.getState().importProject(project));
+            for (const id of ids) await useCanvasStore.getState().retrySave(id);
+            return { ok: true, projectIds: ids };
+        }
+        if (action === "read_media") return { ok: true, ...await writeCanvasTransfer(projectId, await sourceBlob()), mimeType: source?.metadata?.mimeType };
+        if (action === "import_media" || action === "replace_media") {
+            if (action === "import_media" && Array.isArray(args.files)) {
+                if (!args.files.length || args.files.length > 100) throw new Error("一次导入需要 1–100 个文件");
+                const nodeIds: string[] = [];
+                for (const value of args.files) {
+                    const file = value as Record<string, unknown>;
+                    const type = String(file.type || "image") as CanvasNodeType;
+                    if (![CanvasNodeType.Image, CanvasNodeType.Panorama, CanvasNodeType.Video, CanvasNodeType.Audio].includes(type)) throw new Error("素材类型无效");
+                    const bytes = await readCanvasTransfer(projectId, String(file.artifact_id));
+                    nodeIds.push(await addFile(new Blob([bytes], { type: String(file.mimeType || "application/octet-stream") }), String(file.title || "导入素材"), type, nodeIds.length * 440));
+                }
+                return { ok: true, nodeIds };
+            }
+            const type = String(args.type || (action === "replace_media" ? requireSource().type : "image")) as CanvasNodeType;
+            if (![CanvasNodeType.Image, CanvasNodeType.Panorama, CanvasNodeType.Video, CanvasNodeType.Audio].includes(type)) throw new Error("素材类型必须是 image、panorama、video 或 audio");
+            const mime = String(args.mimeType || (isCanvasImageNodeType(type) ? "image/png" : type === CanvasNodeType.Video ? "video/mp4" : "audio/mpeg"));
+            const bytes = await readCanvasTransfer(projectId, String(args.artifact_id || ""));
+            const blob = new Blob([bytes], { type: mime });
+            if (action === "import_media") return { ok: true, nodeId: await addFile(blob, String(args.title || "导入素材"), type) };
+            const node = requireSource();
+            if (!isCanvasImageNodeType(node.type) && node.type !== CanvasNodeType.Video && node.type !== CanvasNodeType.Audio) throw new Error("只能替换素材节点");
+            if ((node.metadata as Record<string, unknown>)?.locked || (node.metadata as Record<string, unknown>)?.agentLocked || (node as unknown as Record<string, unknown>).locked) throw new Error("节点已锁定");
+            if (node.metadata?.status === "loading") throw new Error("现有任务仍在执行，请先查询结果");
+            if (isPanoramaNodeType(node.type) && !isCanvasImageNodeType(type)) throw new Error("全景图节点只能替换为图片");
+            const stored = isCanvasImageNodeType(type) ? await uploadImage(blob) : await uploadMediaFile(blob, type);
+            const metadata: CanvasNodeMetadata = { ...node.metadata, ...(isCanvasImageNodeType(type) ? imageMetadata(stored as UploadedImage) : type === CanvasNodeType.Video ? videoMetadata(stored) : audioMetadata(stored)), canvasCommandId: command.task_id };
+            // The command claim retains the old document and media. Stale task/storage references must not replace this new original later.
+            for (const key of ["localMedia", "errorDetails", "imageTaskId", "imageTaskResultId", "videoTaskId", "audioTaskId", "taskId", "progress", "startedAt", "isBatchRoot", "batchRootId", "batchChildIds", "batchUsesReferenceImages", "primaryImageId", "imageBatchExpanded"]) delete (metadata as Record<string, unknown>)[key];
+            const nextType = isPanoramaNodeType(node.type) ? CanvasNodeType.Panorama : type;
+            const nextSize = nextType === CanvasNodeType.Panorama ? PANORAMA_NODE_SIZE : nextType === CanvasNodeType.Audio ? NODE_DEFAULT_SIZE[CanvasNodeType.Audio] : fitNodeSize(metadata.naturalWidth || 1280, metadata.naturalHeight || 720);
+            nodesRef.current = nodesRef.current.map((item) => {
+                if (item.id === node.id) return { ...node, type: nextType, title: String(args.title || node.title), ...nextSize, metadata };
+                const meta = { ...item.metadata };
+                if (meta.batchRootId === node.id) delete meta.batchRootId;
+                if (meta.batchChildIds?.includes(node.id)) meta.batchChildIds = meta.batchChildIds.filter((id) => id !== node.id);
+                if (meta.primaryImageId === node.id) delete meta.primaryImageId;
+                return { ...item, metadata: meta };
+            });
+            setNodes(nodesRef.current); setSelectedNodeIds(new Set([node.id]));
+            return { ok: true, nodeId: node.id };
+        }
+        if (action === "collect_asset") {
+            const node = requireSource();
+            if (node.type === CanvasNodeType.Group || node.type === CanvasNodeType.Config || node.type === CanvasNodeType.Director || (!node.metadata?.content && !node.metadata?.storageKey)) throw new Error("节点没有可收藏的内容");
+            const before = new Set(useAssetStore.getState().assets.map((asset) => asset.id));
+            await executeSaveNodeAsset(node);
+            const ids = useAssetStore.getState().assets.filter((asset) => !before.has(asset.id)).map((asset) => asset.id);
+            return { ok: ids.length > 0, assetIds: ids };
+        }
+        if (action === "crop_image" || action === "split_image" || action === "capture_video_frame" || action === "upscale_image") {
+            requireSource();
+            const blob = await sourceBlob();
+            const url = URL.createObjectURL(blob);
+            try {
+                if (action === "capture_video_frame") {
+                    if (source?.type !== CanvasNodeType.Video) throw new Error("目标必须是视频节点");
+                    const frame = await captureVideoFrame(url, ["first", "last", "current"].includes(String(args.position)) ? args.position as VideoFramePosition : "first", Number(args.seconds || 0));
+                    return { ok: true, nodeId: await addFile(frame, String(args.title || "视频截帧"), CanvasNodeType.Image) };
+                }
+                if (!isCanvasImageNodeType(source?.type)) throw new Error("目标必须是图片节点");
+                if (action === "upscale_image") {
+                    const params = args.params as CanvasImageUpscaleParams;
+                    if (!params || !Number.isInteger(params.targetLongEdge) || params.targetLongEdge < 32 || params.targetLongEdge > MAX_UPSCALE_LONG_EDGE || !["high", "bilinear", "nearest"].includes(params.algorithm)) throw new Error("放大参数无效：长边为 32–4096 像素");
+                    const data = await upscaleDataUrl(url, params);
+                    return { ok: true, nodeId: await addFile(await (await fetch(data)).blob(), String(args.title || "高清放大"), CanvasNodeType.Image) };
+                }
+                if (action === "crop_image") {
+                    const crop = args.crop as CanvasImageCropRect | undefined;
+                    if (crop && ![crop.x, crop.y, crop.width, crop.height].every((v) => typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1)) throw new Error("裁剪参数需要使用 0–1 比例");
+                    const data = await cropDataUrl(url, crop);
+                    return { ok: true, nodeId: await addFile(await (await fetch(data)).blob(), String(args.title || "裁剪图片"), CanvasNodeType.Image) };
+                }
+                const horizontalLines = Array.isArray(args.horizontalLines) ? args.horizontalLines.map(Number) : [];
+                const verticalLines = Array.isArray(args.verticalLines) ? args.verticalLines.map(Number) : [];
+                if (horizontalLines.length > 10 || verticalLines.length > 10 || ![...horizontalLines, ...verticalLines].every((v) => Number.isFinite(v) && v > 0 && v < 1)) throw new Error("分割线须为 0–1 之间的比例，每个方向最多 10 条");
+                const pieces = await splitDataUrl(url, { horizontalLines, verticalLines });
+                const nodeIds: string[] = [];
+                for (const piece of pieces) nodeIds.push(await addFile(await (await fetch(piece.dataUrl)).blob(), `分割 ${piece.row + 1}-${piece.column + 1}`, CanvasNodeType.Image, nodeIds.length * 440));
+                return { ok: true, nodeIds };
+            } finally { URL.revokeObjectURL(url); }
+        }
+        if (["mask_edit_image", "generate_angle", "retry_node"].includes(action)) {
+            const node = requireSource();
+            const metadata = node.metadata as Record<string, unknown> | undefined;
+            if (metadata?.locked === true || metadata?.agentLocked === true || (node as unknown as Record<string, unknown>).locked === true) throw new Error("节点已锁定");
+            const before = new Set(nodesRef.current.map((node) => node.id));
+            if (action === "retry_node") {
+                if (node.metadata?.status === "loading") throw new Error("现有任务仍在执行，请先查询结果");
+                await executeRetryNode(node, command.task_id, flushCanvasForAgent);
+            } else if (action === "generate_angle") {
+                const params = args.params as CanvasImageAngleParams;
+                if (!params || ![params.horizontalAngle, params.pitchAngle, params.cameraDistance].every(Number.isFinite) || Math.abs(params.horizontalAngle) > 60 || Math.abs(params.pitchAngle) > 60 || params.cameraDistance < 1 || params.cameraDistance > 20 || typeof params.wideAngle !== "boolean") throw new Error("角度参数无效");
+                if (!isCanvasImageNodeType(node.type)) throw new Error("目标必须是图片节点");
+                await executeGenerateAngleNode(node, params, command.task_id, flushCanvasForAgent);
+            } else {
+                if (!isCanvasImageNodeType(node.type) || !String(args.prompt || "").trim()) throw new Error("局部编辑需要图片节点和修改要求");
+                const data = await readCanvasTransfer(projectId, String(args.artifact_id || ""));
+                const markedDataUrl = await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = () => reject(new Error("标记图片读取失败")); reader.readAsDataURL(new Blob([data], { type: "image/png" })); });
+                await executeMaskEditImageNode(node, { markedDataUrl, prompt: String(args.prompt), model: String(args.model || node.metadata?.model || effectiveConfig.imageModel), channelId: typeof args.channelId === "string" ? args.channelId : undefined }, command.task_id, flushCanvasForAgent);
+            }
+            await new Promise<void>((resolve) => setTimeout(resolve, 0));
+            const outputs = nodesRef.current.filter((node) => !before.has(node.id) || (action === "retry_node" && node.id === args.nodeId));
+            if (!outputs.length) throw new Error("没有产生新的任务节点");
+            const failed = outputs.find((node) => node.metadata?.status === "error");
+            return { ok: !failed, pending: outputs.some((node) => node.metadata?.status === "loading"), createdNodeIds: outputs.map((node) => node.id), message: failed?.metadata?.errorDetails };
+        }
+        if (action === "generate_node") {
+            const node = requireSource();
+            const metadata = node.metadata as Record<string, unknown> | undefined;
+            if (metadata?.locked === true || metadata?.agentLocked === true || (node as unknown as Record<string, unknown>).locked === true) throw new Error("节点已锁定，请先由用户解除锁定");
+            const mode = String(args.mode || node.metadata?.generationMode || "image") as CanvasNodeGenerationMode;
+            if (!["text", "image", "video", "audio"].includes(mode)) throw new Error("生成类型无效");
+            const prompt = String(args.prompt ?? node.metadata?.composerContent ?? node.metadata?.prompt ?? "");
+            if (!isAiConfigReady(buildGenerationConfig(effectiveConfig, node, mode), buildGenerationConfig(effectiveConfig, node, mode).model)) throw new Error("请先完成节点对应的模型和渠道配置");
+            const before = new Set(nodesRef.current.map((node) => node.id));
+            nodesRef.current = nodesRef.current.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, canvasCommandId: command.task_id } } : item);
+            setNodes(nodesRef.current); await flushCanvasForAgent();
+            await executeGenerateNode(node.id, mode, prompt);
+            await new Promise<void>((resolve) => setTimeout(resolve, 0));
+            const created = nodesRef.current.filter((item) => !before.has(item.id));
+            const outputs = created.length ? created : nodesRef.current.filter((item) => item.id === node.id);
+            const failed = outputs.find((item) => item.metadata?.status === "error");
+            return { ok: !failed, pending: outputs.some((item) => item.metadata?.status === "loading"), nodeId: node.id, createdNodeIds: outputs.map((item) => item.id), message: failed?.metadata?.errorDetails };
+        }
+        const normalized = normalizeCanvasAgentAction(action, args, command.task_id);
+        const result = (desktopRuntime ? await executeCanonicalAgentEdit(normalized) : null) || await executeCanvasAgentAction(normalized, []);
+        return { ...result, pending: result.ok && result.status === "loading" };
+    }, [desktopRuntime, executeCanonicalAgentEdit, effectiveConfig, executeCanvasAgentAction, executeMaskEditImageNode, executeGenerateAngleNode, executeRetryNode, flushCanvasForAgent, getCanvasCenter, executeGenerateNode, isAiConfigReady, projectId, redoCanvas, executeSaveNodeAsset, undoCanvas, uploadImage, uploadMediaFile]);
+
+    const commandExecutorRef = useRef<CanvasExecutor | null>(null);
+    commandExecutorRef.current = {
+        projectId,
+        busy: () => Boolean(!projectLoaded || titleEditing || isNodeDragging || editingNodeId || runningNodeId || openDirectorNodeId || nodesRef.current.some((node) => node.metadata?.status === "loading")),
+        preview: (command) => {
+            const args = command.request.arguments;
+            const node = nodesRef.current.find((node) => node.id === args.nodeId);
+            const action = command.request.action;
+            const mode = String(args.mode || (action.includes("video") || (action === "retry_node" && node?.type === CanvasNodeType.Video) ? "video" : action.includes("audio") || (action === "retry_node" && node?.type === CanvasNodeType.Audio) ? "audio" : node?.metadata?.generationMode || "image")) as CanvasNodeGenerationMode;
+            const config = buildGenerationConfig(["generate_node", "mask_edit_image", "generate_angle", "retry_node"].includes(action) ? effectiveConfig : agentEffectiveConfig, node, mode);
+            return { model: String(args.model || config.model), quantity: String(args.count ?? (command.request.action === "generate_node" ? config.count : 1)), size: String(args.size || config.size), seconds: mode === "video" ? String(args.seconds ?? config.videoSeconds) : "", prompt: String(args.prompt ?? node?.metadata?.composerContent ?? node?.metadata?.prompt ?? "") };
+        },
+        flush: flushCanvasForAgent,
+        sync: syncCanvasDocument,
+        execute: executeCanvasCommand,
+    };
+    useEffect(() => {
+        if (!projectLoaded || !desktopRuntime) return;
+        return registerCanvasExecutor({ projectId,
+            busy: () => commandExecutorRef.current?.busy() ?? true,
+            preview: (command) => commandExecutorRef.current!.preview(command),
+            flush: () => commandExecutorRef.current!.flush(),
+            sync: (document) => commandExecutorRef.current!.sync(document),
+            execute: (command) => commandExecutorRef.current!.execute(command),
+        });
+    }, [desktopRuntime, projectId, projectLoaded]);
+
+    const executeUnifiedAgentAction = useCallback(async (action: CanvasAgentAction, referenceIds: string[]): Promise<CanvasAgentToolResult> => {
+        if (!desktopRuntime) return executeCanvasAgentAction(action, referenceIds);
+        if (action.name === "canvas_mutate") {
+            await flushCanvasForAgent();
+            const result = await applyDesktopCanvasOperations({ project_id: projectId, request_id: action.id, base_revision: String(action.arguments.base_revision), actor: "agent", operations: action.arguments.operations as Record<string, unknown>[] }, action.arguments.mode === "dry_run");
+            if (action.arguments.mode !== "dry_run") await syncCanvasDocument(result);
+            return { ok: true, revision: result.revision, nodeCount: result.project.nodes.length };
+        }
+        if (action.name === "canvas_task" && action.arguments.action === "list") return { ok: true, ...await listCanvasCommandHistory(projectId, Number(action.arguments.offset || 0)) };
+        if (action.name === "canvas_task" && action.arguments.action !== "submit") {
+            const task = await getCanvasCommand(projectId, String(action.arguments.task_id), action.arguments.action === "cancel");
+            return { ok: true, ...task, taskId: task.task_id };
+        }
+        if (isCanvasAgentMediaAction(action) || action.name === "canvas_task") {
+            await flushCanvasForAgent();
+            const document = await readCanvasDocument(projectId);
+            const args = action.name === "canvas_task" ? (action.arguments.arguments as Record<string, unknown>) : { ...action.arguments, sourceNodeIds: action.arguments.sourceNodeIds || referenceIds };
+            const task = await submitCanvasCommand({ project_id: projectId, request_id: action.id, base_revision: document.revision, action: action.name === "canvas_task" ? String(action.arguments.command) : action.name, arguments: args });
+            return { ok: true, taskId: task.task_id, status: task.status, pending: true, message: task.status === "pending_approval" ? "任务等待用户授权，尚未提交生成" : "任务已排队；请通过 canvas_task 查询结果" };
+        }
+        const edited = await executeCanonicalAgentEdit(action);
+        if (edited) return edited;
+        if (action.name === "get_canvas_summary") await flushCanvasForAgent();
+        return executeCanvasAgentAction(action, referenceIds);
+    }, [desktopRuntime, executeCanonicalAgentEdit, executeCanvasAgentAction, flushCanvasForAgent, projectId, syncCanvasDocument]);
+
+    const manualCommandPending = useRef(false);
+    const enqueueCanvasUiCommand = useCallback(async (action: string, args: Record<string, unknown>) => {
+        if (manualCommandPending.current) throw new Error("上一项操作正在提交，请稍候");
+        manualCommandPending.current = true;
+        try {
+            await flushCanvasForAgent();
+            const document = await readCanvasDocument(projectId);
+            const task = await submitCanvasCommand({ project_id: projectId, request_id: nanoid(), base_revision: document.revision, action, arguments: args });
+            // The explicit UI action authorizes this exact request only.
+            if (task.status === "pending_approval") await approveCanvasCommand(task, true);
+            message.success("任务已加入队列");
+            return task;
+        } finally { manualCommandPending.current = false; }
+    }, [flushCanvasForAgent, projectId]);
+    const manualImportQueueRef = useRef<Promise<void>>(Promise.resolve());
+    manualMediaImportRef.current = async (files, sourceNodeId) => {
+        const run = async () => {
+            const uploads = await Promise.all(files.map(async (file) => ({ ...await writeCanvasTransfer(projectId, file.blob), title: file.title, type: file.type, mimeType: file.blob.type })));
+            const task = await enqueueCanvasUiCommand("import_media", { files: uploads, ...(sourceNodeId ? { nodeId: sourceNodeId } : {}), ...(files[0]?.position ? { position: files[0].position } : {}) });
+            const started = Date.now();
+            while (Date.now() - started < 120000) {
+                const latest = await getCanvasCommand(projectId, task.task_id);
+                if (latest.status === "succeeded") return;
+                if (["failed", "cancelled", "interrupted"].includes(latest.status)) throw new Error(String(latest.result?.message || "素材导入失败，请查询任务记录"));
+                await new Promise((resolve) => setTimeout(resolve, 250));
+            }
+            throw new Error("素材仍在处理中，请查询任务记录");
+        };
+        const pending = manualImportQueueRef.current.catch(() => {}).then(run);
+        manualImportQueueRef.current = pending;
+        return pending;
+    };
+    const cropImageNode = useCallback(async (node: CanvasNodeData, crop: CanvasImageCropRect) => {
+        if (!desktopRuntime) return executeCropImageNode(node, crop);
+        try { await enqueueCanvasUiCommand("crop_image", { nodeId: node.id, crop }); setCropNodeId(null); } catch (error) { message.error(String(error)); }
+    }, [desktopRuntime, enqueueCanvasUiCommand, executeCropImageNode]);
+    const splitImageNode = useCallback(async (node: CanvasNodeData, params: CanvasImageSplitParams) => {
+        if (!desktopRuntime) return executeSplitImageNode(node, params);
+        try { await enqueueCanvasUiCommand("split_image", { nodeId: node.id, ...params }); setSplitNodeId(null); } catch (error) { message.error(String(error)); }
+    }, [desktopRuntime, enqueueCanvasUiCommand, executeSplitImageNode]);
+    const saveNodeAsset = useCallback(async (node: CanvasNodeData) => {
+        if (!desktopRuntime) return executeSaveNodeAsset(node);
+        try { await enqueueCanvasUiCommand("collect_asset", { nodeId: node.id }); } catch (error) { message.error(String(error)); }
+    }, [desktopRuntime, enqueueCanvasUiCommand, executeSaveNodeAsset]);
+    const upscaleImageNode = useCallback(async (node: CanvasNodeData, params: CanvasImageUpscaleParams) => {
+        try {
+            if (!desktopRuntime) { await executeUpscaleImageNode(node, params); return; }
+            await enqueueCanvasUiCommand("upscale_image", { nodeId: node.id, params }); setUpscaleNodeId(null);
+        } catch (error) { message.error(String(error)); }
+    }, [desktopRuntime, enqueueCanvasUiCommand, executeUpscaleImageNode]);
+    const handleGenerateNode = useCallback(async (nodeId: string, mode: CanvasNodeGenerationMode, prompt: string) => {
+        try {
+            if (!desktopRuntime) { await executeGenerateNode(nodeId, mode, prompt); return; }
+            const node = nodesRef.current.find((node) => node.id === nodeId);
+            const config = buildGenerationConfig(effectiveConfig, node, mode);
+            if (!isAiConfigReady(config, config.model)) { openConfigDialog(true); return; }
+            await enqueueCanvasUiCommand("generate_node", { nodeId, mode, prompt });
+        } catch (error) { message.error(String(error)); }
+    }, [desktopRuntime, effectiveConfig, enqueueCanvasUiCommand, executeGenerateNode, isAiConfigReady, openConfigDialog]);
+    const maskEditImageNode = useCallback(async (node: CanvasNodeData, payload: CanvasImageMaskEditPayload) => {
+        try {
+            if (!desktopRuntime) { await executeMaskEditImageNode(node, payload); return; }
+            const artifact = await writeCanvasTransfer(projectId, await (await fetch(payload.markedDataUrl)).blob());
+            await enqueueCanvasUiCommand("mask_edit_image", { nodeId: node.id, prompt: payload.prompt, model: payload.model, ...(payload.channelId ? { channelId: payload.channelId } : {}), artifact_id: artifact.artifact_id });
+            setMaskEditNodeId(null);
+        } catch (error) { message.error(String(error)); }
+    }, [desktopRuntime, enqueueCanvasUiCommand, executeMaskEditImageNode, projectId]);
+    const generateAngleNode = useCallback(async (node: CanvasNodeData, params: CanvasImageAngleParams) => {
+        try {
+            if (!desktopRuntime) { await executeGenerateAngleNode(node, params); return; }
+            await enqueueCanvasUiCommand("generate_angle", { nodeId: node.id, params }); setAngleNodeId(null);
+        } catch (error) { message.error(String(error)); }
+    }, [desktopRuntime, enqueueCanvasUiCommand, executeGenerateAngleNode]);
+    const runLocalCollaborationDemo = useCallback(async () => {
+        if (activeAgentBatchRef.current) {
+            message.warning("已有 Agent 批次正在执行，请等待完成后再运行演示");
+            return;
+        }
+        const batchId = `local-demo-${nanoid()}`;
+        startCanvasAgentBatch({ batchId, summary: "零付费本地演示：创建可编辑文本节点" });
+        try {
+            const action: CanvasAgentAction = {
+                id: nanoid(),
+                name: "create_text_node",
+                arguments: {
+                    title: "Agent 协作演示",
+                    content: "这是本地创建的可编辑节点。你可以锁定、拖拽或修改文字，再检查 revision 冲突与批次撤销。",
+                    sourceNodeIds: [],
+                },
+            };
+            const result = await executeCanvasAgentAction(action, []);
+            noteCanvasAgentActionResult({ batchId, action, result });
+            finishCanvasAgentBatch({ batchId, ...(result.ok ? {} : { error: result.message || "本地演示失败" }) });
+        } catch (error) {
+            finishCanvasAgentBatch({ batchId, error: error instanceof Error ? error.message : "本地演示失败" });
+        }
+    }, [executeCanvasAgentAction, finishCanvasAgentBatch, message, noteCanvasAgentActionResult, startCanvasAgentBatch]);
+
+    const handleRetryNode = useCallback(async (node: CanvasNodeData) => {
+        try {
+            if (!desktopRuntime) { await executeRetryNode(node); return; }
+            await enqueueCanvasUiCommand("retry_node", { nodeId: node.id });
+        } catch (error) { message.error(String(error)); }
+    }, [desktopRuntime, enqueueCanvasUiCommand, executeRetryNode]);
+
+    const handleImageInputChange = useCallback(
+        async (event: ReactChangeEvent<HTMLInputElement>) => {
+            const file = event.target.files?.[0];
+            const target = uploadTargetRef.current;
+            if (!file || (!file.type.startsWith("image/") && !file.type.startsWith("video/") && !isAudioFile(file))) return;
+            const targetNode = target?.nodeId ? nodesRef.current.find((node) => node.id === target.nodeId) : null;
+            if (isPanoramaNodeType(targetNode?.type) && !file.type.startsWith("image/")) {
+                message.warning("全景图节点仅支持上传图片作为参考");
+                uploadTargetRef.current = null;
+                event.target.value = "";
+                return;
+            }
+
+            if (desktopRuntime) {
+                try {
+                    if (!target?.nodeId) {
+                        const position = target?.position || getCanvasCenter();
+                        await (isAudioFile(file) ? createAudioFileNode(file, position) : file.type.startsWith("video/") ? createVideoFileNode(file, position) : createImageFileNode(file, position, true));
+                        return;
+                    }
+                    const artifact = await writeCanvasTransfer(projectId, file);
+                    const type = isAudioFile(file) ? "audio" : file.type.startsWith("video/") ? "video" : isPanoramaNodeType(targetNode?.type) ? "panorama" : "image";
+                    await enqueueCanvasUiCommand(target?.nodeId ? "replace_media" : "import_media", { artifact_id: artifact.artifact_id, type, mimeType: file.type, title: file.name, ...(target?.nodeId ? { nodeId: target.nodeId } : {}), ...(target?.position ? { position: target.position } : {}) });
+                } catch (error) { message.error(String(error)); }
+                finally { uploadTargetRef.current = null; event.target.value = ""; }
+                return;
+            }
+
+            if (target?.nodeId) {
+                const hideLoading = message.loading(isAudioFile(file) ? "正在上传音频..." : file.type.startsWith("video/") ? "正在上传视频..." : "正在上传图片...", 0);
+                try {
+                    if (isAudioFile(file)) {
+                        const audio = await uploadMediaFile(file, "audio");
+                        const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Audio];
+                        setNodes((prev) => prev.map((node) => (node.id === target.nodeId ? { ...node, type: CanvasNodeType.Audio, title: file.name, position: { x: node.position.x + node.width / 2 - spec.width / 2, y: node.position.y + node.height / 2 - spec.height / 2 }, width: spec.width, height: spec.height, metadata: { ...node.metadata, ...audioMetadata(audio), errorDetails: undefined } } : node)));
+                        setSelectedNodeIds(new Set([target.nodeId]));
+                        setSelectedConnectionId(null);
+                    } else if (file.type.startsWith("video/")) {
+                        const video = await uploadMediaFile(file, "video");
+                        const nextSize = fitNodeSize(video.width || 1280, video.height || 720, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
+                        setNodes((prev) => prev.map((node) => (node.id === target.nodeId ? { ...node, type: CanvasNodeType.Video, title: file.name, position: { x: node.position.x + node.width / 2 - nextSize.width / 2, y: node.position.y + node.height / 2 - nextSize.height / 2 }, width: nextSize.width, height: nextSize.height, metadata: { ...node.metadata, ...videoMetadata(video), errorDetails: undefined } } : node)));
+                        setSelectedNodeIds(new Set([target.nodeId]));
+                        setSelectedConnectionId(null);
+                        setDialogNodeId(target.nodeId);
+                    } else {
+                        const image = await uploadImage(file);
+                        const size = fitNodeSize(image.width, image.height);
+                        setNodes((prev) =>
+                            prev.map((node) => {
+                                if (node.id !== target.nodeId) return node;
+                                const isPanorama = isPanoramaNodeType(node.type);
+                                const nextSize = isPanorama ? PANORAMA_NODE_SIZE : size;
+                                return {
+                                    ...node,
+                                    type: isPanorama ? CanvasNodeType.Panorama : CanvasNodeType.Image,
+                                    title: isPanorama ? node.title : file.name,
+                                    position: isPanorama ? { x: node.position.x + node.width / 2 - nextSize.width / 2, y: node.position.y + node.height / 2 - nextSize.height / 2 } : node.position,
+                                    width: nextSize.width,
+                                    height: nextSize.height,
+                                    metadata: {
+                                        ...node.metadata,
+                                        ...imageMetadata(image),
+                                        errorDetails: undefined,
+                                        freeResize: false,
+                                        isBatchRoot: undefined,
+                                        batchRootId: undefined,
+                                        batchChildIds: undefined,
+                                        batchUsesReferenceImages: undefined,
+                                        generationType: undefined,
+                                        model: isPanorama ? node.metadata?.model : undefined,
+                                        size: isPanorama ? PANORAMA_IMAGE_SIZE : undefined,
+                                        quality: isPanorama ? node.metadata?.quality : undefined,
+                                        count: isPanorama ? node.metadata?.count : undefined,
+                                        references: undefined,
+                                        primaryImageId: undefined,
+                                        imageBatchExpanded: undefined,
+                                        imageTaskId: undefined,
+                                        imageTaskResultId: undefined,
+                                        panoramaSourcePrompt: isPanorama ? node.metadata?.panoramaSourcePrompt : undefined,
+                                        panoramaFinalPrompt: undefined,
+                                        panoramaProjection: undefined,
+                                    },
+                                };
+                            }),
+                        );
+                        setSelectedNodeIds(new Set([target.nodeId]));
+                        setSelectedConnectionId(null);
+                        setDialogNodeId(target.nodeId);
+                    }
+                } catch (error) {
+                    console.error("Upload node file failed:", error);
+                    message.error("上传失败");
+                } finally {
+                    hideLoading();
+                }
+            } else {
+                const position = target?.position || screenToCanvas((containerRef.current?.getBoundingClientRect().left || 0) + size.width / 2, (containerRef.current?.getBoundingClientRect().top || 0) + size.height / 2);
+                void (isAudioFile(file) ? createAudioFileNode(file, position) : file.type.startsWith("video/") ? createVideoFileNode(file, position) : createImageFileNode(file, position, true));
+            }
+
+            uploadTargetRef.current = null;
+            event.target.value = "";
+        },
+        [desktopRuntime, enqueueCanvasUiCommand, getCanvasCenter, projectId, createAudioFileNode, createImageFileNode, createVideoFileNode, screenToCanvas, size.height, size.width],
+    );
 
     const generateImageFromTextNode = useCallback(
         (node: CanvasNodeData) => {
@@ -5130,6 +5491,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
 
                 <CanvasSaveStatus projectId={projectId}>
                     <CanvasVersionHistory projectId={projectId} />
+                    {desktopRuntime && <CanvasCommandPermissions projectId={projectId} />}
                 </CanvasSaveStatus>
                 <CanvasCollaborationStatus collaboration={collaboration} nodes={nodes} onUndoLatest={undoLatestCanvasAgentBatch} onRunDemo={collaborationDemoEnabled ? () => void runLocalCollaborationDemo() : undefined} />
 
@@ -5601,12 +5963,14 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                         setAssetPickerOpen(true);
                     }}
                     getAgentContext={getCanvasAgentContext}
-                    onExecuteAction={executeCanvasAgentAction}
+                    onExecuteAction={executeUnifiedAgentAction}
                     onAgentRunStart={startCanvasAgentBatch}
                     onAgentRunProgress={updateCanvasAgentProgress}
                     onAgentActionResult={noteCanvasAgentActionResult}
                     onAgentRunComplete={finishCanvasAgentBatch}
-                    onCollapseStart={() => setAgentPanel((current) => ({ ...current, open: false }))}
+                    onCollapseStart={() =>
+                        setAgentPanel((current) => ({ ...current, open: false }))
+                    }
                     onCollapse={() => setAssistantMounted(false)}
                     initialRequest={initialAgentRequest}
                     onInitialRequestConsumed={() => setInitialAgentRequest(null)}
@@ -6620,7 +6984,7 @@ function canvasAgentTaskSummary(node: CanvasNodeData) {
 function canvasAgentVideoDurationHint(modelName: string) {
     const key = modelKey(modelName);
     if (isCogVideoX3Model(key)) return { values: [5, 10], range: "仅 5 或 10 秒" };
-    if (key.includes("seedance")) return { values: [-1, 4, 5, 6, 8, 10, 12, 15], range: "智能或 4-15 秒" };
+    if (key.includes("seedance")) return { values: seedanceDurationOptionsForModel(modelName), range: `智能或 4-${seedanceMaxDuration(modelName)} 秒` };
     if (isCanvasAgentKlingV3(key)) return { values: [3, 15], range: "3-15 秒" };
     if (isCanvasAgentKlingV26(key)) return { values: [5, 10], range: "仅 5 或 10 秒" };
     return { values: [6, 10, 12, 16, 20], range: "1-30 秒" };
@@ -6630,7 +6994,7 @@ function validateCanvasAgentVideoSeconds(modelName: string, seconds: number) {
     if (!Number.isFinite(seconds)) return "视频时长无效，请先向用户确认单镜头时长";
     const key = modelKey(modelName);
     if (isCogVideoX3Model(key) && seconds !== 5 && seconds !== 10) return "当前 CogVideoX-3 模型仅支持 5 或 10 秒";
-    if (key.includes("seedance") && seconds !== -1 && (seconds < 4 || seconds > 15)) return "当前 Seedance 模型仅支持智能时长或 4-15 秒";
+    if (key.includes("seedance") && seconds !== -1 && (seconds < 4 || seconds > seedanceMaxDuration(modelName))) return `当前 Seedance 模型仅支持智能时长或 4-${seedanceMaxDuration(modelName)} 秒`;
     if (isCanvasAgentKlingV3(key) && (seconds < 3 || seconds > 15)) return "当前 Kling 3 模型仅支持 3-15 秒";
     if (isCanvasAgentKlingV26(key) && seconds !== 5 && seconds !== 10) return "当前 Kling 2.6 模型仅支持 5 或 10 秒";
     if (!key.includes("seedance") && !key.includes("kling") && (seconds < 1 || seconds > 30)) return "当前视频模型仅支持 1-30 秒";

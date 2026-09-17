@@ -5,6 +5,8 @@ mod db;
 mod direct;
 mod kie;
 mod kie_advanced;
+mod laogou;
+mod laogou_refs;
 mod media;
 mod prompt_sources;
 mod prompts;

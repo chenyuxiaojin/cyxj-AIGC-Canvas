@@ -5,22 +5,22 @@ use std::{
 };
 
 use axum::{
-    body::Body,
-    extract::{rejection::JsonRejection, DefaultBodyLimit, Path, State},
+    body::{Body, Bytes},
+    extract::{rejection::JsonRejection, DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::sync::oneshot;
 
 use crate::{
     capabilities, AgentOperationRequest, AgentRuntime, BridgeError, CanvasOperationAdapter,
-    CredentialStore, ImageIngestRequest, ProjectCreateRequest, TestClipRequest,
+    CanvasCommandRequest, CredentialStore, ImageIngestRequest, ProjectCreateRequest, TestClipRequest,
     VideoGenerationRequest, VideoIngestRequest,
 };
 
@@ -132,6 +132,13 @@ fn router(state: BridgeState) -> Router {
         .route("/v1/capabilities", get(get_capabilities))
         .route("/v1/projects", get(list_projects).post(create_project))
         .route("/v1/projects/:project_id", get(get_project))
+        .route("/v1/projects/:project_id/actions", post(project_action))
+        .route("/v1/projects/:project_id/transfers", post(upload_transfer).layer(DefaultBodyLimit::max(crate::transfers::MAX_BYTES)))
+        .route("/v1/projects/:project_id/transfers/:artifact_id", get(download_transfer))
+        .route("/v1/canvas/commands", post(submit_command))
+        .route("/v1/projects/:project_id/commands", get(list_commands))
+        .route("/v1/projects/:project_id/commands/:request_id", get(command_status))
+        .route("/v1/projects/:project_id/commands/:request_id/cancel", post(cancel_command))
         .route("/v1/canvas/operations/dry-run", post(dry_run_operations))
         .route("/v1/canvas/operations/apply", post(apply_operations))
         .route("/v1/runtime", get(runtime_report))
@@ -581,6 +588,32 @@ async fn submit_video_generation(
         "estimated_cost_yuan": estimated_cost_yuan,
         "model": model
     }))))
+}
+
+async fn project_action(State(state):State<BridgeState>,Path(project):Path<String>,payload:Result<Json<Value>,JsonRejection>)->Result<Json<Success<Value>>,BridgeError> {
+    let Json(request)=structured_json(payload)?;
+    Ok(Json(Success::new(state.canvas.project_action(&project,&request)?)))
+}
+async fn upload_transfer(State(state):State<BridgeState>,Path(project):Path<String>,bytes:Bytes)->Result<Json<Success<Value>>,BridgeError> {
+    Ok(Json(Success::new(state.canvas.write_transfer(&project,&bytes)?)))
+}
+async fn download_transfer(State(state):State<BridgeState>,Path((project,id)):Path<(String,String)>)->Result<Response,BridgeError> {
+    Ok(([(http::header::CONTENT_TYPE,"application/octet-stream"),(http::header::CACHE_CONTROL,"no-store")],state.canvas.read_transfer(&project,&id)?).into_response())
+}
+async fn submit_command(State(state):State<BridgeState>,payload:Result<Json<CanvasCommandRequest>,JsonRejection>)->Result<Json<Success<Value>>,BridgeError> {
+    let Json(request)=structured_json(payload)?;
+    Ok(Json(Success::new(state.canvas.submit_command(request)?)))
+}
+#[derive(Deserialize, Default)]
+struct CommandQuery { #[serde(default)] offset: u32 }
+async fn list_commands(State(state):State<BridgeState>,Path(project):Path<String>,Query(query):Query<CommandQuery>)->Result<Json<Success<Value>>,BridgeError> {
+    Ok(Json(Success::new(state.canvas.list_commands(&project,query.offset)?)))
+}
+async fn command_status(State(state):State<BridgeState>,Path((project,id)):Path<(String,String)>)->Result<Json<Success<Value>>,BridgeError> {
+    Ok(Json(Success::new(state.canvas.command_status(&project,&id)?)))
+}
+async fn cancel_command(State(state):State<BridgeState>,Path((project,id)):Path<(String,String)>)->Result<Json<Success<Value>>,BridgeError> {
+    Ok(Json(Success::new(state.canvas.cancel_command(&project,&id)?)))
 }
 
 async fn submit_test_clip(

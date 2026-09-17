@@ -5,7 +5,10 @@ import { dataUrlToFile, readFileAsDataUrl } from "@/lib/image-utils";
 import { isMiniMaxH3Config, normalizeMiniMaxH3Duration, normalizeMiniMaxH3Ratio, normalizeMiniMaxH3Resolution } from "@/lib/minimax-video";
 import { dataUrlToGeminiInlineData, geminiActionUrl, geminiDirectHeaders, geminiErrorMessage, geminiOperationUrl, isGeminiConfig, isGeminiVideoModel } from "@/lib/gemini";
 import { isGeminiVeo31Model, normalizeGeminiVideoDuration, normalizeGeminiVideoRatio, normalizeGeminiVideoResolution } from "@/lib/gemini-video";
-import { boolConfig, isSeedanceVideoConfig, normalizeSeedanceRatio } from "@/lib/seedance-video";
+import { boolConfig, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceResolution, seedancePixelLabel } from "@/lib/seedance-video";
+import { parseOpenAIChatVideoResponse } from "@/lib/openai-chat-video";
+import { localVideoGatewayUrl } from "@/lib/local-video-gateway";
+import { isSeedanceMediaConfig, seedanceMediaDuration } from "@/lib/seedance-media";
 import { isKIEGrokVideoModel, isKIEKlingV3Config, kieKlingOmniVariant } from "@/components/video-settings-panel";
 import { isAgnesVideoV25Model, isCogVideoX3Model, modelKey, normalizeCogVideoX3Duration, supportsVideoAudioGeneration } from "@/lib/video-model-capabilities";
 import { readMediaOriginal, uploadMediaFile } from "@/services/file-storage";
@@ -42,10 +45,11 @@ function usesAccountProxy(config: AiConfig) {
 function aiApiUrl(config: AiConfig, path: string) {
     if (usesAccountProxy(config)) return `/api/v1${path}`;
     const channel = localChannelForActiveModel(config);
-    return buildApiUrl(channel?.baseUrl || config.baseUrl, path);
+    return localVideoGatewayUrl(buildApiUrl(channel?.baseUrl || config.baseUrl, path));
 }
 
 function aiVideoPollUrl(config: AiConfig, model: string, id: string) {
+    if (isSeedanceMediaConfig(config)) return aiApiUrl(config, `/media/videos/${encodeURIComponent(id)}`);
     if (!usesAccountProxy(config) && isGeminiConfig(config, model)) {
         const channel = localChannelForActiveModel(config);
         return geminiOperationUrl(channel?.baseUrl || config.baseUrl, id);
@@ -109,6 +113,13 @@ export async function requestVideoGeneration(config: AiConfig, prompt: string, r
 export async function createVideoGenerationTask(config: AiConfig, prompt: string, references: ReferenceImage[] | VideoReferenceInput = [], onProgress?: VideoProgressHandler, options?: string | VideoTaskCreateOptions): Promise<CreatedVideoGenerationTask> {
     const model = config.model || config.videoModel;
     const systemPrompt = (config.systemPrompts.video || config.systemPrompt).trim();
+    const channel = localChannelForActiveModel(config);
+    if (!usesAccountProxy(config) && isSeedanceMediaConfig(config)) {
+        return createMediaVideoTask(config, systemPrompt ? `${systemPrompt}\n\n${prompt}` : prompt, normalizeVideoReferenceInput(references));
+    }
+    if (!usesAccountProxy(config) && channel?.protocol === "openai" && channel.videoApiMode === "chat") {
+        return createChatVideoTask(config, systemPrompt ? `${systemPrompt}\n\n${prompt}` : prompt, normalizeVideoReferenceInput(references), normalizeVideoTaskCreateOptions(options));
+    }
     const body = await createVideoRequestBody(config, model, systemPrompt ? `${systemPrompt}\n\n${prompt}` : prompt, normalizeVideoReferenceInput(references));
     const startedAt = Date.now();
     try {
@@ -140,7 +151,58 @@ function normalizeVideoTaskCreateOptions(options?: string | VideoTaskCreateOptio
     return typeof options === "string" ? { clientTaskId: options } : options || {};
 }
 
+async function createMediaVideoTask(config: AiConfig, prompt: string, input: Required<VideoReferenceInput>): Promise<CreatedVideoGenerationTask> {
+    if (input.videoReferences.length || input.audioReferences.length || input.firstFrame || input.lastFrame) throw new VideoRequestError("Seedance 媒体接口当前使用普通参考图，不支持音视频参考或首尾帧");
+    const model = config.model || config.videoModel;
+    if (input.references.length > (model === "seedance2.5" ? 30 : 9)) throw new VideoRequestError("参考图数量超过此模型的限制");
+    const images = await Promise.all(input.references.map(imageToDataUrl));
+    if (images.some((image) => !image)) throw new VideoRequestError("参考图原文件尚未读取成功，请恢复素材后再生成");
+    const ratio = normalizeSeedanceRatio(config.size);
+    const body = { model, prompt, duration: seedanceMediaDuration(model, config.videoSeconds), ratio: ratio === "adaptive" ? "16:9" : ratio, resolution: "720p", camera_movement: "auto", image_urls: images };
+    const startedAt = Date.now();
+    const url = aiApiUrl(config, "/media/videos");
+    const idempotencyKey = crypto.randomUUID();
+    try {
+        // One create only. Network uncertainty must never silently create another paid job.
+        const response = await axios.post(url, body, { headers: { ...aiHeaders(config), "Idempotency-Key": idempotencyKey }, timeout: 900000 });
+        const parsed = normalizeVideoResponse(response.data);
+        if (!parsed.id) throw new VideoRequestError("视频接口没有返回任务 ID", response.data);
+        const task = { ...parsed, model, seconds: String(body.duration), size: seedancePixelLabel("720p", body.ratio) };
+        return { task, pollId: task.id, startedAt, requestBody: { ...body, idempotency_key: idempotencyKey } };
+    } catch (error) {
+        const { message } = readAxiosError(error, "视频创建结果未确认，请先核对任务，勿重复生成");
+        throw new VideoRequestError(`${message}（${url}）`, { endpoint: url, idempotencyKey, response: axios.isAxiosError(error) ? error.response?.data : undefined });
+    }
+}
+
+async function createChatVideoTask(config: AiConfig, prompt: string, input: Required<VideoReferenceInput>, options: VideoTaskCreateOptions): Promise<CreatedVideoGenerationTask> {
+    if (input.videoReferences.length || input.audioReferences.length || input.firstFrame || input.lastFrame) throw new VideoRequestError("OpenAI 对话视频接口当前使用文字和普通参考图，请将图片放入参考图区域");
+    const model = config.model || config.videoModel;
+    const startedAt = Date.now();
+    const url = aiApiUrl(config, "/chat/completions");
+    const images = await Promise.all(input.references.map(imageToDataUrl));
+    if (images.some((image) => !image)) throw new VideoRequestError("参考图原文件尚未读取成功，请恢复素材后再生成");
+    const body = {
+        model, stream: false,
+        messages: [{ role: "user", content: [{ type: "text", text: prompt }, ...images.map((url) => ({ type: "image_url", image_url: { url } }))] }],
+        duration: isSeedanceVideoConfig(config) ? normalizeSeedanceDuration(config.videoSeconds, model) : Number(normalizeVideoSeconds(config.videoSeconds)),
+        aspect_ratio: normalizeSeedanceRatio(config.size),
+        resolution: normalizeSeedanceResolution(config.vquality, model),
+        generate_audio: boolConfig(config.videoGenerateAudio, true),
+    };
+    try {
+        const response = await axios.post(url, body, { headers: aiHeaders(config), timeout: 900000 });
+        const task = { ...parseOpenAIChatVideoResponse(response.data, options.clientTaskId || `video_${crypto.randomUUID()}`), model, size: seedancePixelLabel(body.resolution, body.aspect_ratio) || config.size, seconds: String(body.duration) };
+        return { task, pollId: task.id, startedAt, requestBody: body };
+    } catch (error) {
+        const detail = axios.isAxiosError(error) ? { endpoint: url, status: error.response?.status, requestId: error.response?.headers?.["x-request-id"], response: error.response?.data } : { endpoint: url };
+        const { message } = readAxiosError(error, "视频生成请求失败");
+        throw new VideoRequestError(`${message}（${url}）`, detail);
+    }
+}
+
 export async function pollCreatedVideoGenerationTask(config: AiConfig, task: VideoResponse, { startedAt = Date.now(), requestBody, initialDelayMs = 0, onProgress, onPoll }: { startedAt?: number; requestBody?: unknown; initialDelayMs?: number; onProgress?: VideoProgressHandler; onPoll?: (task: VideoResponse) => void } = {}) {
+    if (localChannelForActiveModel(config)?.videoApiMode === "chat" && (task.video_url || task.url)) return buildVideoGenerationResult(task, task.video_url || task.url!, Date.now() - startedAt);
     const model = config.model || config.videoModel;
     const pollId = videoPollId(model, task);
     if (!pollId) throw new VideoRequestError("视频接口没有返回任务 ID", task);
@@ -153,7 +215,9 @@ export async function pollCreatedVideoGenerationTask(config: AiConfig, task: Vid
     try {
         if (initialDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, initialDelayMs));
         for (; ;) {
-            const video = await cacheProtectedGeminiVideo(config, model, await pollOnce());
+            const polled = await pollOnce();
+            onPoll?.(polled); // Preserve the upstream ID even if content download fails.
+            const video = await cacheMediaVideo(config, await cacheProtectedGeminiVideo(config, model, polled));
             onPoll?.(video);
             if (isFailedVideoStatus(video.status)) throw new VideoRequestError(video.error?.message || "视频生成失败", video);
             if (typeof video.progress === "number") onProgress?.(video.progress, video);
@@ -177,14 +241,29 @@ export async function pollCreatedVideoGenerationTask(config: AiConfig, task: Vid
 }
 
 export async function pollVideoGenerationTaskStatus(config: AiConfig, task: VideoResponse) {
+    if (localChannelForActiveModel(config)?.videoApiMode === "chat" && (task.video_url || task.url)) return task;
     const model = config.model || config.videoModel;
     const pollId = videoPollId(model, task);
     if (!pollId) throw new VideoRequestError("视频接口没有返回任务 ID", task);
+    if (isSeedanceMediaConfig(config)) {
+        // A failed task is a valid terminal response. Returning it lets the canvas
+        // stop polling and display the provider error instead of spinning forever.
+        const response = await axios.get(aiVideoPollUrl(config, model, pollId), { headers: aiHeaders(config) });
+        return cacheMediaVideo(config, normalizeVideoResponse(response.data));
+    }
     const directProvider = !usesAccountProxy(config) ? directAIProviderForConfig(config) : null;
     const result = directProvider
         ? await (await import("@/services/api/direct-ai")).pollDirectVideoTask(config, directProvider, pollId)
         : unwrapVideoResponseForConfig(config, model, (await axios.get<ApiVideoResponse>(aiVideoPollUrl(config, model, pollId), { headers: aiHeaders(config), params: usesAccountProxy(config) ? { model } : undefined })).data);
-    return cacheProtectedGeminiVideo(config, model, await cacheProtectedGrokVideo(config, model, result));
+    return cacheMediaVideo(config, await cacheProtectedGeminiVideo(config, model, await cacheProtectedGrokVideo(config, model, result)));
+}
+
+async function cacheMediaVideo(config: AiConfig, task: VideoResponse) {
+    if (!isSeedanceMediaConfig(config) || !isCompletedVideoStatus(task.status) || task.storageKey) return task;
+    const response = await axios.get<Blob>(aiApiUrl(config, `/media/videos/${encodeURIComponent(task.id)}/content`), { headers: aiHeaders(config), responseType: "blob", timeout: 900000 });
+    if (!response.data.size || !response.data.type.startsWith("video/")) throw new VideoRequestError("任务已完成，但视频下载返回的内容无效；可继续查询原任务", task);
+    const media = await uploadMediaFile(response.data, "generated-video", false);
+    return { ...task, url: media.url, video_url: media.url, storageKey: media.storageKey, size: task.size || seedancePixelLabel("720p", normalizeSeedanceRatio(config.size)), seconds: task.seconds || config.videoSeconds };
 }
 
 export async function listVideoGenerationTasks(config: AiConfig) {
@@ -884,6 +963,7 @@ function normalizeVideoResponse(value: unknown): VideoResponse {
         userChannelId: firstString(record.userChannelId, record.user_channel_id),
         channelName: firstString(record.channelName, record.channel_name),
         status: firstString(record.status, record.state, record.task_status),
+        error: typeof record.error === "string" ? { message: record.error } : record.error as VideoResponse["error"],
         video_url: firstString(record.video_url, record.videoUrl, record.remixed_from_video_id, record.output_url, record.download_url, firstVideoUrl(record)),
         progress: typeof record.progress === "number" ? record.progress : (typeof record.progress === "string" ? parseFloat(record.progress) : undefined),
     };

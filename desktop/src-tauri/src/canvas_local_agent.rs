@@ -396,6 +396,13 @@ async fn bind_endpoint(
     Ok((listener, format!("/mcp/{token}")))
 }
 
+fn antigravity_agent_definition(name: &str, endpoint: &str) -> String {
+    // Keep built-in permissions empty and configure only the canvas MCP server.
+    // Runtime MCP tool exposure with this allowlist is not yet verified.
+    // The invalid call_mcp_tool registry name failed when the executor started.
+    format!("---\nname: {name}\ndescription: 小陈的画布侧栏助手\nmainAgent: true\nsubagent: false\ninheritCustomizations: false\ncommandExecutionPolicy: off\ntools: []\nmcpServers:\n  - name: xiaochens_canvas_sidepanel\n    serverUrl: {endpoint}\n---\n只通过 canvas MCP 操作画布。媒体和删除由画布用户确认。不使用终端、文件、浏览器或其他外部工具。\n")
+}
+
 fn cli_command(
     session: &Session,
     directory: &std::path::Path,
@@ -447,7 +454,7 @@ fn cli_command(
             let agents = home.join(".gemini/config/agents");
             std::fs::create_dir_all(&agents).map_err(|e| e.to_string())?;
             let name = format!("xiaochens-canvas-{unique}");
-            create_config(session, agents.join(format!("{name}.md")), &format!("---\nname: {name}\ndescription: 小陈的画布侧栏助手\nmainAgent: true\nsubagent: false\ninheritCustomizations: false\ncommandExecutionPolicy: off\ntools: [call_mcp_tool, finish]\nmcpServers:\n  - name: xiaochens_canvas_sidepanel\n    serverUrl: {}\n---\n只通过 canvas MCP 操作画布。媒体和删除由画布用户确认。不使用终端、文件、浏览器或其他外部工具。\n", session.endpoint.lock().unwrap()))?;
+            create_config(session, agents.join(format!("{name}.md")), &antigravity_agent_definition(&name, &session.endpoint.lock().unwrap()))?;
             command.args(["--agent", &name]);
         }
         command.args([
@@ -662,6 +669,19 @@ pub async fn canvas_local_agent_close(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn antigravity_profile_uses_mcp_injection_without_builtin_tool_permissions() {
+        let definition = antigravity_agent_definition("isolated-canvas", "http://127.0.0.1:4321/mcp/test");
+        let frontmatter = definition.split("---").nth(1).unwrap();
+        let field = |name: &str| frontmatter.lines().find_map(|line| line.strip_prefix(&format!("{name}: "))).unwrap().to_owned();
+        assert_eq!(field("tools"), "[]", "built-in permissions stay empty; this does not prove runtime MCP exposure");
+        assert_eq!(field("inheritCustomizations"), "false");
+        assert_eq!(field("subagent"), "false");
+        assert_eq!(field("commandExecutionPolicy"), "off");
+        assert_eq!(frontmatter.matches("serverUrl:").count(), 1);
+        assert!(frontmatter.contains("serverUrl: http://127.0.0.1:4321/mcp/test"));
+    }
     pub(super) fn session(path: &std::path::Path, provider: &str) -> Arc<Session> {
         Arc::new(Session {
             key: "test".into(),

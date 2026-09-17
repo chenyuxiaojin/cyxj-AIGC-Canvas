@@ -12,6 +12,7 @@ export type CanvasResourceReference = {
     label: string;
     title: string;
     previewUrl?: string;
+    storageKey?: string;
     text?: string;
     active: boolean;
 };
@@ -88,6 +89,7 @@ function labelResourceNodes(nodes: CanvasNodeData[], active: boolean) {
                 label,
                 title: node.title || label,
                 previewUrl: node.metadata?.content,
+                storageKey: node.metadata?.storageKey,
                 text: node.type === CanvasNodeType.Text ? node.metadata?.content || node.metadata?.prompt : undefined,
                 active,
             },
@@ -107,7 +109,7 @@ export function isCanvasReferenceNode(node: CanvasNodeData) {
 }
 
 function resourceKind(node: CanvasNodeData): CanvasResourceKind | null {
-    if (isCanvasImageNodeType(node.type) && node.metadata?.content) return "image";
+    if (isCanvasImageNodeType(node.type) && (node.metadata?.content || node.metadata?.storageKey)) return "image";
     if (node.type === CanvasNodeType.Video && node.metadata?.content) return "video";
     if (node.type === CanvasNodeType.Audio && node.metadata?.content) return "audio";
     if (node.type === CanvasNodeType.Text && (node.metadata?.content || node.metadata?.prompt)) return "text";

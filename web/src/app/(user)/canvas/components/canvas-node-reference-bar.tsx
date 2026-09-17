@@ -7,6 +7,7 @@ import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { buildAllCanvasResourceReferences, type CanvasResourceReference } from "../utils/canvas-resource-references";
 import type { CanvasNodeData } from "../types";
+import { useCanvasImageSource } from "../hooks/use-canvas-image-source";
 
 export function CanvasNodeReferenceBar({ nodeId, connectedNodes, onDisconnect, onStartSelection }: { nodeId: string; connectedNodes: CanvasNodeData[]; onDisconnect?: (fromNodeId: string, toNodeId: string) => void; onStartSelection?: (nodeId: string) => void }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
@@ -25,6 +26,8 @@ export function CanvasNodeReferenceBar({ nodeId, connectedNodes, onDisconnect, o
 }
 
 function ReferenceItem({ reference, onRemove }: { reference: CanvasResourceReference; onRemove: () => void }) {
+    const source = useCanvasImageSource({ content: reference.previewUrl, storageKey: reference.storageKey }, reference.kind === "image");
+    if (reference.kind === "image" && source.src) reference = { ...reference, previewUrl: source.src };
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const Icon = reference.kind === "image" ? ImageIcon : reference.kind === "video" ? Video : reference.kind === "audio" ? Music2 : FileText;
     const isMedia = reference.kind === "image" || reference.kind === "video";

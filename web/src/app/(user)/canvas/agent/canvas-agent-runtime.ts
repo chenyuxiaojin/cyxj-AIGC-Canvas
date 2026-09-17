@@ -239,8 +239,8 @@ export function applyAgentState(state: CanvasAgentState, patch: Record<string, u
 export function applyTaskResult(state: CanvasAgentState, result: CanvasAgentToolResult): CanvasAgentState {
     const taskId = typeof result.taskId === "string" ? result.taskId : "";
     if (!taskId) return state;
-    const completed = result.status === "success" || result.status === "completed";
-    const terminal = completed || result.status === "error" || result.status === "failed";
+    const completed = result.status === "success" || result.status === "completed" || result.status === "succeeded";
+    const terminal = completed || result.status === "error" || result.status === "failed" || result.status === "cancelled";
     return {
         ...state,
         pendingTaskIds: terminal ? state.pendingTaskIds.filter((id) => id !== taskId) : [...new Set([...state.pendingTaskIds, taskId])],

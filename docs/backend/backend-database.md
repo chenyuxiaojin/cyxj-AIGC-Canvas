@@ -434,3 +434,12 @@ Agent Bridge 都读写这些行；Agent 不建立第二份画布项目表。
 ## 分支整合后的公共协作状态
 
 `canvas_projects.project_data` 继续保留未知兼容字段，并新增/沿用 `operationState`（revision、locks、tasks、requests、audit、history）。Bridge 公共操作与任务写入同一项目行并记录主线持久历史；没有新增第二套画布表。外部普通操作使用内容 SHA-256 校验，内部协作 reducer 使用数字修订号，两者不能混作同一个版本字段。
+
+## 统一画布命令与原文件传输
+
+桌面 Rust Agent Bridge 初始化两张新增本地表：
+
+- `canvas_commands`：`request_id` 主键，`project_id`、`payload_hash`、`request_json`、`status`、可空 `result_json`、`created_at`、`updated_at`；索引为项目、状态、创建时间。记录待授权、排队、运行、远端已提交、成功、失败、取消、取消请求与中断；重复编号校验完整载荷。
+- `canvas_command_permissions`：`project_id` 主键，`allow_generation`、`updated_at`。只表示用户在该画布授予的后续生成权限，与 CLI 文件或命令权限分开。
+
+原文件传输放在数据库相邻的 `canvas-transfers/<project_id>/<sha256>`，单件不超过 512 MiB，下载核验哈希；不放入 JSON 或任务日志，不保存渠道密钥。删除节点不清理传输、原媒体或恢复历史，尚无自动清理策略。以上两表不取代旧生成接口的上游任务 ID；统一回执记录生成节点及其原任务信息。

@@ -14,6 +14,7 @@ export type LocalModelChannel = {
     baseUrl: string;
     apiKey: string;
     models: string[];
+    videoApiMode?: "videos" | "chat" | "media";
 };
 
 export type VideoMultiPromptItem = { prompt: string; duration: string };
@@ -493,6 +494,7 @@ export function normalizeLocalChannels(config: Partial<AiConfig>): LocalModelCha
         baseUrl: channel.baseUrl || "",
         apiKey: channel.apiKey || "",
         models: Array.isArray(channel.models) ? channel.models.filter(Boolean) : [],
+        videoApiMode: channel.videoApiMode === "media" ? "media" : channel.videoApiMode === "chat" ? "chat" : "videos",
     }));
     if (!normalized.length) {
         normalized.push({ id: "local-default", protocol: "openai", name: "本地直连", baseUrl: config.baseUrl || defaultConfig.baseUrl, apiKey: config.apiKey || "", models: Array.isArray(config.models) ? config.models.filter(Boolean) : [] });

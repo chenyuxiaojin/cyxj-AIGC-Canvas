@@ -54,6 +54,7 @@ export type LocalMediaRuntimeState = {
 };
 
 export type CanvasNodeMetadata = {
+    canvasCommandId?: string;
     content?: string;
     groupId?: string;
     composerContent?: string;

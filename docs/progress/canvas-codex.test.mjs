@@ -71,6 +71,24 @@ test("context percentage does not guess a missing model limit", () => {
     assert.equal(usage.codexContextPercent({ inputTokens: 60, outputTokens: 10, contextWindow: 100 }), 70);
 });
 
+test("current selection and references outrank older approved assets at context limit", () => {
+    const h = harness();
+    const approved = Array.from({ length: 20 }, (_, i) => ({ id: `approved-${i}`, type: "text", text: "older" }));
+    h.context.nodes = [...approved, { id: "reference", type: "text", text: "reference body" }, { id: "selected", type: "text", text: "current task body" }];
+    h.context.selectedNodeIds = ["selected", "missing", "selected"];
+    h.context.agentState.referenceNodeIds = ["reference"];
+    h.context.agentState.approvedNodeIds = approved.map(node => node.id);
+    h.context.connections = [{ fromNodeId: "selected", toNodeId: "reference" }, { fromNodeId: "selected", toNodeId: "approved-19" }];
+    const before = JSON.stringify(h.context);
+    const compact = h.compactCodexCanvasContext(h.context);
+    assert.equal(compact.nodes.length, 16);
+    assert.equal(compact.nodes[0].id, "selected");
+    assert.equal(compact.nodes[0].text, "current task body");
+    assert.equal(compact.nodes[1].id, "reference");
+    assert.equal(compact.connections.length, 1);
+    assert.equal(JSON.stringify(h.context), before);
+});
+
 test("official dynamic tool schema, actual model label, and native history resume", async () => {
     for (const resume of [false, true]) {
         const h = harness({ resume });

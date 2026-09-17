@@ -81,8 +81,11 @@ test("startup only loads local public settings; it never starts account hydratio
     const { ClientRootInit } = load("components/layout/client-root-init.tsx", {
         react: { ...react, useEffect: (fn) => effects.push(fn) },
         "@/stores/use-config-store": { useConfigStore: (select) => select(state) },
+        "./canvas-command-dispatcher": { CanvasCommandDispatcher: () => null },
     }, { window: { location: { search: "" } } });
-    assert.equal(ClientRootInit({ children: "local-content" }).props.children, "local-content");
+    const [content, dispatcher] = ClientRootInit({ children: "local-content" }).props.children;
+    assert.equal(content, "local-content");
+    assert.equal(dispatcher.type.name, "CanvasCommandDispatcher");
     for (const effect of effects) await effect();
     assert.deepEqual(calls, ["settings"]);
 });

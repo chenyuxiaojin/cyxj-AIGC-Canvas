@@ -57,7 +57,7 @@
 ### 模块 1：右侧面板终端化（TUI AI 嵌入与双模切换）
 
 #### 1.1 现状与改造点
-* 现有的 [`canvas-assistant-panel.tsx`](file:///Users/chenhuajin/项目/自己的应用/infinite-canvas/web/src/app/(user)/canvas/components/canvas-assistant-panel.tsx) 是一个标准的 Web Chat 抽屉。
+* 现有的 [`canvas-assistant-panel.tsx`](file:///Users/chenhuajin/项目/自己的应用/小陈的画布/web/src/app/(user)/canvas/components/canvas-assistant-panel.tsx) 是一个标准的 Web Chat 抽屉。
 * **双模设计**：在抽屉顶部加入切换开关：`[ 💬 简易助手 ]` 与 `[ 💻 终端工作台 (TUI) ]`。
 * **Tauri PTY 原生管道**：
   * 在 `desktop/src-tauri/Cargo.toml` 引入 `portable-pty = "0.8"`。
