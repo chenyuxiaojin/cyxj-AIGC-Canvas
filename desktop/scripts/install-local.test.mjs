@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
+import { join } from "node:path";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -10,6 +11,7 @@ const missing = { stderr: `failed to scan ${path}: -10814\n from spotlight` };
 function invoke(error, registry = "") {
   const context = vm.createContext({
     lsregister: "lsregister",
+    join, homedir: () => "/Users/example", bundleId: "com.chenyuxiaojin.infinitecanvas",
     execFileSync(command, args, options) {
       assert.equal(command, "lsregister");
       if (args[0] === "-dump") {
@@ -38,4 +40,18 @@ test("unrelated unregister errors are not swallowed", () => {
 });
 test("similarly named paths do not count as the exact app", () => {
   assert.doesNotThrow(() => invoke(missing, `path:   ${path}-other (0x255c)`));
+});
+
+
+test("a confirmed disabled Trash tombstone does not undo the new installation", () => {
+  assert.doesNotThrow(() => invoke(missing, `path:   ${path} (0x255c)
+identifier: com.chenyuxiaojin.infinitecanvas
+bundle flags: has-display-name trash launch-disabled (0xc2)`));
+});
+test("a live registration or another bundle is never treated as a disabled tombstone", () => {
+  for (const [id, flags] of [["com.other.app", "trash launch-disabled"], ["com.chenyuxiaojin.infinitecanvas", "trash"], ["com.chenyuxiaojin.infinitecanvas", "launch-disabled"]]) {
+    assert.throws(() => invoke(missing, `path: ${path}
+identifier: ${id}
+bundle flags: ${flags}`));
+  }
 });

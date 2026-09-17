@@ -31,9 +31,16 @@ function unregisterApp(path) {
     // A freshly moved Trash path may never have been registered. Only tolerate
     // that specific failure after proving the exact path has no registration.
     const registry = execFileSync(lsregister, ["-dump"], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
-    const registered = registry.split("\n").some((line) => {
-      const match = line.match(/^path:\s+(.+?)(?: \(0x[0-9a-f]+\))?\s*$/i);
-      return match?.[1] === path;
+    const registered = registry.split(/^-{10,}\s*$/m).some((block) => {
+      const match = block.match(/^path:\s+(.+?)(?: \(0x[0-9a-f]+\))?\s*$/im);
+      if (match?.[1] !== path) return false;
+      // Spotlight retains a tombstone for this exact trashed bundle. It cannot
+      // launch and is not a second application; do not roll back a valid install.
+      const flags = block.match(/^bundle flags:\s+(.+)$/im)?.[1] || "";
+      const disabledTrash = path.startsWith(join(homedir(), ".Trash") + "/")
+        && block.match(/^identifier:\s+(.+)$/im)?.[1].trim() === bundleId
+        && /\btrash\b/.test(flags) && /\blaunch-disabled\b/.test(flags);
+      return !disabledTrash;
     });
     if (registered) throw error;
     console.log(`此路径没有应用登记，无需注销：${path}`);

@@ -8,7 +8,7 @@ use crate::{
 use axum::{
     body::{Body, Bytes},
     extract::{DefaultBodyLimit, Path, RawQuery, Request, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -46,6 +46,7 @@ async fn blocking(
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(|| async { "ok" }))
+        .route("/api/ai/laogou/*path", get(laogou_request).post(laogou_request).layer(DefaultBodyLimit::max(100 * 1024 * 1024)))
         .route(
             "/api/ai/direct-request",
             post(direct_request).layer(DefaultBodyLimit::max(1024 * 1024)),
@@ -76,6 +77,9 @@ pub fn router(state: AppState) -> Router {
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(middleware::from_fn(local_origin))
         .with_state(state)
+}
+async fn laogou_request(Path(path): Path<String>, method: Method, headers: HeaderMap, body: Bytes) -> Response {
+    crate::laogou::forward(method, path, headers, body).await
 }
 async fn direct_request(body: Bytes) -> Response {
     let result = if body.is_empty() {

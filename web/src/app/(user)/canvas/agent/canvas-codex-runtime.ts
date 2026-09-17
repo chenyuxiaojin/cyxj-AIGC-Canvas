@@ -6,8 +6,11 @@ import { buildCanvasAgentSkillBundle } from "./canvas-agent-skills";
 import { CANVAS_AGENT_ACTION_NAMES, CANVAS_AGENT_TOOLS, canvasAgentActionLabel, normalizeCanvasAgentAction } from "./canvas-agent-tools";
 
 export function compactCodexCanvasContext(context: CanvasAgentContext): CanvasAgentContext {
-    const relevant = new Set([...context.selectedNodeIds, ...context.agentState.approvedNodeIds, ...context.agentState.referenceNodeIds]);
-    const nodes = context.nodes.filter((node) => relevant.has(node.id)).slice(0, 16);
+    // The user's current selection must not be displaced by older approved
+    // assets simply because those nodes occur earlier in canvas storage order.
+    const relevant = new Set([...context.selectedNodeIds, ...context.agentState.referenceNodeIds, ...context.agentState.approvedNodeIds]);
+    const byId = new Map(context.nodes.map((node) => [node.id, node]));
+    const nodes = [...relevant].flatMap((id) => { const node = byId.get(id); return node ? [node] : []; }).slice(0, 16);
     const ids = new Set(nodes.map((node) => node.id));
     return { ...context, nodes, connections: context.connections.filter((edge) => ids.has(edge.fromNodeId) && ids.has(edge.toNodeId)), tasks: context.tasks.filter((task) => ids.has(task.nodeId)) };
 }

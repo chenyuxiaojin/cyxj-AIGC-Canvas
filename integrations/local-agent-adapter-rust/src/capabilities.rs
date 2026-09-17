@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 
 pub fn catalog() -> Value {
     json!({
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "transport": {
             "kind": "http_loopback",
             "listen_host": "127.0.0.1",
@@ -15,7 +15,7 @@ pub fn catalog() -> Value {
             "idempotency": "request_id_and_payload",
             "concurrency": "sha256_base_revision_compare_and_swap",
             "canonical_adapter": "CanvasOperationAdapter",
-            "temporary_backend": "same_sqlite_canvas_projects_table"
+            "backend": "rust_shared_sqlite_canvas_projects"
         },
         "capabilities": [
             {
@@ -34,7 +34,7 @@ pub fn catalog() -> Value {
                 "risk": "read_only",
                 "dry_run": false,
                 "paid": false,
-                "source": "go_canvas_projects_same_database"
+                "source": "rust_canvas_projects_same_database"
             },
             {
                 "id": "projects.get",
@@ -43,7 +43,7 @@ pub fn catalog() -> Value {
                 "risk": "read_only",
                 "dry_run": false,
                 "paid": false,
-                "source": "go_canvas_projects_same_database"
+                "source": "rust_canvas_projects_same_database"
             },
             {
                 "id": "canvas.operations.dry_run",
@@ -63,6 +63,11 @@ pub fn catalog() -> Value {
                 "paid": false,
                 "source": "CanvasOperationAdapter",
                 "operations": [
+                    "create_node",
+                    "update_node",
+                    "delete_node",
+                    "set_group_members",
+                    "update_project",
                     "create_text_node",
                     "move_node",
                     "set_node_text",
@@ -71,6 +76,20 @@ pub fn catalog() -> Value {
                     "remove_connection"
                 ]
             },
+            {
+                "id":"canvas.commands.submit", "method":"POST", "path":"/v1/canvas/commands",
+                "risk":"action_dependent", "paid":"generation_only", "source":"AppCanvasExecutor",
+                "actions":crate::commands::ACTIONS,
+                "generation_authorization":"project_permission_or_pending_approval",
+                "execution":"App must be running; open_project selects the bound canvas without manual clicks. A queue receipt is not media success.",
+                "idempotency":"request_id_and_exact_payload; claimed commands are never automatically replayed"
+            },
+            {"id":"canvas.commands.list","method":"GET","path":"/v1/projects/{project_id}/commands?offset=0","risk":"read_only","paid":false},
+            {"id":"canvas.commands.status","method":"GET","path":"/v1/projects/{project_id}/commands/{request_id}","risk":"read_only","paid":false},
+            {"id":"canvas.commands.cancel","method":"POST","path":"/v1/projects/{project_id}/commands/{request_id}/cancel","risk":"reversible_write","paid":false,"note":"Running remote work may continue; cancel_requested does not mean provider cancellation."},
+            {"id":"media.upload","method":"POST","path":"/v1/projects/{project_id}/transfers","content_type":"application/octet-stream","max_bytes":crate::transfers::MAX_BYTES,"paid":false},
+            {"id":"media.download","method":"GET","path":"/v1/projects/{project_id}/transfers/{artifact_id}","content_type":"application/octet-stream","paid":false},
+            {"id":"projects.actions","method":"POST","path":"/v1/projects/{project_id}/actions","actions":["create","history","preview","restore"],"risk":"action_dependent","paid":false},
             {
                 "id": "runtime.probe",
                 "method": "GET",
@@ -119,18 +138,6 @@ pub fn catalog() -> Value {
             }
         ],
         "existing_interfaces": {
-            "go_rest": [
-                "GET /api/v1/canvas/projects",
-                "POST /api/v1/canvas/projects",
-                "POST /api/v1/canvas/projects/sync",
-                "POST /api/v1/canvas/projects/delete",
-                "POST /api/v1/canvas/image-tasks",
-                "GET /api/v1/canvas/image-tasks/{id}",
-                "POST /api/v1/canvas/audio-tasks",
-                "GET /api/v1/canvas/audio-tasks/{id}",
-                "GET /api/v1/video-tasks",
-                "DELETE /api/v1/video-tasks/{id}"
-            ],
             "tauri_ipc": [
                 "probe_desktop_runtime",
                 "generate_desktop_test_clip",
@@ -156,7 +163,6 @@ pub fn catalog() -> Value {
             "arbitrary_executable",
             "arbitrary_path",
             "arbitrary_url",
-            "paid_generation",
             "public_network_listener",
             "raw_sql"
         ]

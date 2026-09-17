@@ -7,6 +7,12 @@ import type { CanvasExportAsset, CanvasExportFile } from "../export-types";
 import type { CanvasProject } from "../stores/use-canvas-store";
 
 export async function exportCanvasProjects(projects: CanvasProject[], fileName = "小陈的画布") {
+    const zip = await createCanvasArchive(projects);
+    if (isDesktopRuntime()) return saveCanvasExport(await zip.arrayBuffer());
+    saveAs(zip, `${safeFileName(fileName)}.zip`);
+}
+
+export async function createCanvasArchive(projects: CanvasProject[]) {
     const zipFiles: { name: string; data: BlobPart }[] = [];
     const exportedProjects = [];
     for (const project of projects) {
@@ -25,11 +31,7 @@ export async function exportCanvasProjects(projects: CanvasProject[], fileName =
     }
 
     const data: CanvasExportFile = { app: "infinite-canvas", version: 3, exportedAt: new Date().toISOString(), projects: exportedProjects };
-    const zip = await createZip([{ name: "projects.json", data: JSON.stringify(data, null, 2) }, ...zipFiles]);
-    if (isDesktopRuntime()) {
-        return saveCanvasExport(await zip.arrayBuffer());
-    }
-    saveAs(zip, `${safeFileName(fileName)}.zip`);
+    return createZip([{ name: "projects.json", data: JSON.stringify(data, null, 2) }, ...zipFiles]);
 }
 
 export function collectStorageKeys(value: unknown, keys = new Set<string>()) {

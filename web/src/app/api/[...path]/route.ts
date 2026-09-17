@@ -35,7 +35,7 @@ async function proxy(request: NextRequest, context: RouteContext) {
     const incomingId = request.headers.get("x-request-id") || "";
     const requestId = /^[0-9a-f-]{36}$/i.test(incomingId) ? incomingId : crypto.randomUUID();
     // No total deadline: long streams remain alive while bytes arrive.
-    const lifetime = requestLifetime(request.signal, 300_000);
+    const lifetime = requestLifetime(request.signal, path.slice(0, 2).join("/") === "ai/laogou" ? 900_000 : 300_000);
     const headers = proxyHeaders(request);
     headers.set("x-request-id", requestId);
     try {

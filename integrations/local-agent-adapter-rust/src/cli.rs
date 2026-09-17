@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 
 use crate::{
     read_credential_token, serve_mcp_stdio, setup_project_binding, AgentOperationRequest,
-    BridgeClient, BridgeError, TestClipRequest,
+    BridgeClient, BridgeError, TestClipRequest, CanvasCommandRequest,
 };
 
 #[derive(Debug, Parser)]
@@ -38,6 +38,15 @@ pub enum Command {
     Agents(AgentsArgs),
     Mcp(McpArgs),
     Credentials(CredentialsArgs),
+    Media(MediaArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct MediaArgs { #[command(subcommand)] pub command: MediaCommand }
+#[derive(Debug, Subcommand)]
+pub enum MediaCommand {
+    Upload { project_id:String, #[arg(long)] file:PathBuf },
+    Download { project_id:String, artifact_id:String, #[arg(long)] file:PathBuf },
 }
 
 #[derive(Debug, Args)]
@@ -82,6 +91,7 @@ pub struct ProjectsArgs {
 pub enum ProjectsCommand {
     List,
     Get { project_id: String },
+    Action { project_id: String, #[arg(long)] file: PathBuf },
 }
 
 #[derive(Debug, Args)]
@@ -115,9 +125,13 @@ pub struct TasksArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum TasksCommand {
+    List { project_id: String, #[arg(long, default_value_t = 0)] offset: u32 },
     Status { task_id: String },
     Cancel { task_id: String },
     TestClip(InputFile),
+    Submit(InputFile),
+    Get { project_id: String, request_id: String },
+    Stop { project_id: String, request_id: String },
 }
 
 #[derive(Debug, Args)]
@@ -231,12 +245,33 @@ fn execute_bridge(
     let token = read_credential_token(credential_path)?;
     let client = BridgeClient::new(endpoint, token)?;
     match command {
+        Command::Media(args) => match args.command {
+            MediaCommand::Upload{project_id,file} => {
+                validate_route_identifier(&project_id)?;
+                let mut bytes=Vec::new();
+                std::fs::File::open(file).and_then(|file|file.take(crate::transfers::MAX_BYTES as u64+1).read_to_end(&mut bytes)).map_err(|_|BridgeError::invalid("无法读取本地素材。"))?;
+                if bytes.len()>crate::transfers::MAX_BYTES {return Err(BridgeError::invalid("素材超过 512 MiB。"));}
+                client.upload(&format!("/v1/projects/{project_id}/transfers"),&bytes)
+            }
+            MediaCommand::Download{project_id,artifact_id,file} => {
+                use std::io::Write;
+                validate_route_identifier(&project_id)?; validate_route_identifier(&artifact_id)?;
+                let bytes=client.download(&format!("/v1/projects/{project_id}/transfers/{artifact_id}"))?;
+                let mut output=std::fs::OpenOptions::new().write(true).create_new(true).open(file).map_err(|_|BridgeError::invalid("输出文件已存在或无法创建，请选择新文件名。"))?;
+                output.write_all(&bytes).map_err(|_|BridgeError::internal("无法写入下载文件。"))?;
+                Ok(json!({"ok":true,"data":{"artifact_id":artifact_id,"bytes":bytes.len()}}))
+            }
+        },
         Command::Capabilities => client.get("/v1/capabilities"),
         Command::Projects(args) => match args.command {
             ProjectsCommand::List => client.get("/v1/projects"),
             ProjectsCommand::Get { project_id } => {
                 validate_route_identifier(&project_id)?;
                 client.get(&format!("/v1/projects/{project_id}"))
+            }
+            ProjectsCommand::Action { project_id, file } => {
+                validate_route_identifier(&project_id)?;
+                client.post(&format!("/v1/projects/{project_id}/actions"), &read_json::<Value>(&file)?)
             }
         },
         Command::Canvas(args) => match args.command {
@@ -252,6 +287,16 @@ fn execute_bridge(
             },
         },
         Command::Tasks(args) => match args.command {
+            TasksCommand::List { project_id, offset } => { validate_route_identifier(&project_id)?; client.get(&format!("/v1/projects/{project_id}/commands?offset={offset}")) },
+            TasksCommand::Submit(input) => client.post("/v1/canvas/commands",&read_json::<CanvasCommandRequest>(&input.file)?),
+            TasksCommand::Get { project_id, request_id } => {
+                validate_route_identifier(&project_id)?; validate_route_identifier(&request_id)?;
+                client.get(&format!("/v1/projects/{project_id}/commands/{request_id}"))
+            }
+            TasksCommand::Stop { project_id, request_id } => {
+                validate_route_identifier(&project_id)?; validate_route_identifier(&request_id)?;
+                client.post(&format!("/v1/projects/{project_id}/commands/{request_id}/cancel"),&json!({}))
+            }
             TasksCommand::Status { task_id } => {
                 validate_route_identifier(&task_id)?;
                 client.get(&format!("/v1/tasks/{task_id}"))

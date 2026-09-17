@@ -3,6 +3,7 @@
 import type { ReactNode } from "react";
 import { useEffect, useRef } from "react";
 import { useConfigStore } from "@/stores/use-config-store";
+import { CanvasCommandDispatcher } from "./canvas-command-dispatcher";
 
 export function ClientRootInit({ children }: { children: ReactNode }) {
     const handledConfigParams = useRef(false);
@@ -31,5 +32,5 @@ export function ClientRootInit({ children }: { children: ReactNode }) {
         openConfigDialog(false);
     }, [openConfigDialog, updateConfig]);
 
-    return <>{children}</>;
+    return <>{children}<CanvasCommandDispatcher /></>;
 }

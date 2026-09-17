@@ -3,6 +3,8 @@ import { nanoid } from "nanoid";
 import type { CanvasAgentPhase } from "../types";
 
 export const CANVAS_AGENT_ACTION_NAMES = [
+    "canvas_mutate",
+    "canvas_task",
     "get_canvas_summary",
     "get_selected_nodes",
     "get_node",
@@ -85,6 +87,14 @@ function defineTool(name: CanvasAgentActionName, description: string, properties
 }
 
 export const CANVAS_AGENT_TOOLS: CanvasAgentToolDefinition[] = [
+    defineTool("canvas_mutate", "通过统一接口编辑所有节点类型、属性、分组和画布设置。先读取摘要中的 revision。操作包括 create_node {node:{id,type,title,position,width,height,metadata}}、update_node {node_id,patch}、delete_node {node_id}、set_group_members {group_id,node_ids}、update_project {patch}、add_connection 和 remove_connection。metadata 补丁中的 null 清除对应字段。", {
+        base_revision: STRING,
+        operations: { type: "array", minItems: 1, maxItems: 100, items: { type: "object" } },
+        mode: { type: "string", enum: ["dry_run", "apply"] },
+    }, ["base_revision", "operations"]),
+    defineTool("canvas_task", "提交或查询统一画布任务。生成任务按项目授权执行；queued/pending_approval/submitted 只代表排队、待授权或处理中，不能说成已生成。支持 generate_node（指定已有节点与 mode/prompt）、export_project、import_project、import_media、read_media、collect_asset、crop_image、split_image、capture_video_frame、upscale_image（nodeId、params 含 targetLongEdge 与 algorithm）、replace_media（nodeId、artifact_id、type）、mask_edit_image（nodeId、artifact_id 标记图片、prompt）、generate_angle（nodeId、params 含 horizontalAngle、pitchAngle、cameraDistance、wideAngle）、retry_node、director_read/director_capture/director_export_video（nodeId，截图 preset 为 current/four/twelve）、undo、redo。", {
+        action: { type: "string", enum: ["list", "submit", "status", "cancel"] }, offset: { type: "integer", minimum: 0 }, task_id: STRING, command: STRING, arguments: { type: "object" },
+    }, ["action"]),
     defineTool("get_canvas_summary", "读取当前画布摘要、节点、连线、模型配置和任务状态。"),
     defineTool("get_selected_nodes", "读取用户当前选中的真实画布节点。"),
     defineTool("get_node", "按真实节点 ID 读取节点。", { nodeId: STRING }, ["nodeId"]),
@@ -172,6 +182,15 @@ export function normalizeCanvasAgentAction(name: unknown, args: unknown, id = na
     let normalized: Record<string, unknown> = {};
 
     switch (actionName) {
+        case "canvas_mutate":
+            if (!Array.isArray(input.operations) || !input.operations.length || input.operations.length > 100) throw new Error("operations 需要 1–100 个操作");
+            normalized = { base_revision: requiredString(input.base_revision, "base_revision"), operations: input.operations, mode: input.mode === "dry_run" ? "dry_run" : "apply" };
+            break;
+        case "canvas_task":
+            if (!["list", "submit", "status", "cancel"].includes(String(input.action))) throw new Error("任务 action 无效");
+            if (input.action === "list") { if (input.offset != null && (!Number.isInteger(input.offset) || Number(input.offset) < 0)) throw new Error("offset 必须是非负整数"); normalized = { action: "list", offset: input.offset || 0 }; break; }
+            normalized = input.action === "submit" ? { action: "submit", command: requiredString(input.command, "command"), arguments: isRecord(input.arguments) ? input.arguments : {} } : { action: input.action, task_id: requiredString(input.task_id, "task_id") };
+            break;
         case "get_canvas_summary":
         case "get_selected_nodes":
         case "get_generation_config":
@@ -298,6 +317,8 @@ export function parseCanvasAgentJson(content: string): ParsedCanvasAgentJson {
 
 export function canvasAgentActionLabel(action: CanvasAgentAction) {
     const labels: Record<CanvasAgentActionName, string> = {
+        canvas_mutate: "正在操作画布",
+        canvas_task: "正在处理画布任务",
         get_canvas_summary: "正在读取画布",
         get_selected_nodes: "正在读取选中节点",
         get_node: "正在读取节点",

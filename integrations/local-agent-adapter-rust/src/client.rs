@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{time::Duration, io::Read};
 
 use http::StatusCode;
 use serde::Serialize;
@@ -14,6 +14,20 @@ pub struct BridgeClient {
 }
 
 impl BridgeClient {
+    pub fn upload(&self, path:&str, bytes:&[u8])->Result<Value,BridgeError> {
+        decode_response(self.agent.post(&self.url(path)?).set("Authorization",&format!("Bearer {}",self.token)).send_bytes(bytes))
+    }
+    pub fn download(&self,path:&str)->Result<Vec<u8>,BridgeError> {
+        match self.agent.get(&self.url(path)?).set("Authorization",&format!("Bearer {}",self.token)).call() {
+            Ok(response)=>{
+                let mut bytes=Vec::new();
+                response.into_reader().take(crate::transfers::MAX_BYTES as u64+1).read_to_end(&mut bytes).map_err(|_|BridgeError::unavailable("素材传输中断。"))?;
+                if bytes.len()>crate::transfers::MAX_BYTES {return Err(BridgeError::invalid("素材超过 512 MiB。"));}
+                Ok(bytes)
+            }
+            Err(error)=>{decode_response(Err(error))?;unreachable!()}
+        }
+    }
     pub fn new(endpoint: &str, token: String) -> Result<Self, BridgeError> {
         let endpoint = validate_endpoint(endpoint)?;
         if token.trim().is_empty() {

@@ -4,7 +4,7 @@
 
 - 专属分支：`feat/local-agent-adapter`
 - 起点：`e00acb71cf02dcc04e78f13ec76b63b6413a93d0`（`feat/macos-director-console`）
-- 独立 worktree：`/Users/chenhuajin/项目/自己的应用/infinite-canvas-worktrees/local-agent-adapter`
+- 原独立 worktree 已清理，`feat/local-agent-adapter` 分支保留；当前源码目录为 `~/项目/自己的应用/小陈的画布`，恢复说明见 [工程清理记录](../progress/workspace-cleanup.md)。
 - 本分支不合并其他功能分支，也不改写主检出。
 
 ## 已完成

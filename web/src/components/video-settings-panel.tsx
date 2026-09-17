@@ -4,7 +4,8 @@ import { type CSSProperties, type ReactNode } from "react";
 import { Input, Switch } from "antd";
 
 import { ImageSettingsTheme } from "@/components/image-settings-panel";
-import { boolConfig, isSeedanceFastOrMiniModel, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceResolution, seedanceDurationOptions, seedancePixelLabel, seedanceRatioOptions, seedanceResolutionOptions } from "@/lib/seedance-video";
+import { boolConfig, isSeedanceFastOrMiniModel, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceResolution, seedanceDurationOptionsForModel, seedanceMaxDuration, seedancePixelLabel, seedanceRatioOptions, seedanceResolutionOptions } from "@/lib/seedance-video";
+import { isSeedanceMediaConfig, seedanceMediaDuration, seedanceMediaDurations } from "@/lib/seedance-media";
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { COGVIDEOX3_DURATIONS, isCogVideoX3Model, modelKey, normalizeCogVideoX3Duration, supportsVideoAudioGeneration } from "@/lib/video-model-capabilities";
 import { channelIdForActiveModel, localChannelForActiveModel, channelProtocolForConfig, type AiConfig } from "@/stores/use-config-store";
@@ -264,11 +265,13 @@ function KlingV26VideoSettingsPanel({ config, modelName, onConfigChange, theme, 
 
 function SeedanceVideoSettingsPanel({ config, modelName, onConfigChange, theme, showTitle, className, visualOnly }: VideoSettingsPanelProps) {
     const model = modelName || config.model || config.videoModel;
-    const resolution = normalizeSeedanceResolution(config.vquality, model);
-    const ratio = normalizeSeedanceRatio(config.size);
-    const duration = normalizeSeedanceDuration(config.videoSeconds);
+    const media = isSeedanceMediaConfig(config);
+    const resolution = media ? "720p" : normalizeSeedanceResolution(config.vquality, model);
+    const normalizedRatio = normalizeSeedanceRatio(config.size);
+    const ratio = media && normalizedRatio === "adaptive" ? "16:9" : normalizedRatio;
+    const duration = media ? seedanceMediaDuration(model, config.videoSeconds) : normalizeSeedanceDuration(config.videoSeconds, model);
     const watermark = boolConfig(config.videoWatermark, false);
-    const audioGenerationEnabled = supportsVideoAudioGeneration(model);
+    const audioGenerationEnabled = !media && supportsVideoAudioGeneration(model);
     const generateAudio = boolConfig(config.videoGenerateAudio, false);
 
     return (
@@ -277,7 +280,7 @@ function SeedanceVideoSettingsPanel({ config, modelName, onConfigChange, theme, 
                 {showTitle ? <div className="text-lg font-semibold">视频设置</div> : null}
                 <SettingGroup title="分辨率" color={theme.node.muted}>
                     <div className="grid grid-cols-3 gap-2.5">
-                        {seedanceResolutionOptions.map((item) => {
+                        {seedanceResolutionOptions.filter(item => !media || item.value === "720p").map((item) => {
                             const disabled = item.value === "1080p" && isSeedanceFastOrMiniModel(model);
                             return (
                                 <OptionPill key={item.value} selected={resolution === item.value} disabled={disabled} theme={theme} onClick={() => onConfigChange("vquality", item.value)}>
@@ -290,7 +293,7 @@ function SeedanceVideoSettingsPanel({ config, modelName, onConfigChange, theme, 
                 </SettingGroup>
                 <SettingGroup title="比例" color={theme.node.muted}>
                     <div className="grid grid-cols-3 gap-2.5">
-                        {seedanceRatioOptions.map((item) => (
+                        {seedanceRatioOptions.filter(item => !media || item.value !== "adaptive").map((item) => (
                             <button
                                 key={item.value}
                                 type="button"
@@ -310,20 +313,20 @@ function SeedanceVideoSettingsPanel({ config, modelName, onConfigChange, theme, 
                     <>
                         <SettingGroup title="时长" color={theme.node.muted}>
                             <div className="grid grid-cols-4 gap-2.5">
-                                {seedanceDurationOptions.map((value) => (
+                                {(media ? seedanceMediaDurations[model] || [] : seedanceDurationOptionsForModel(model)).map((value) => (
                                     <OptionPill key={value} selected={duration === value} theme={theme} onClick={() => onConfigChange("videoSeconds", String(value))}>
                                         {value === -1 ? "智能" : `${value}s`}
                                     </OptionPill>
                                 ))}
                             </div>
-                            <NumberInput value={String(duration)} min={-1} max={15} theme={theme} onChange={(value) => onConfigChange("videoSeconds", value)} />
+                            {!media ? <NumberInput value={String(duration)} min={-1} max={seedanceMaxDuration(model)} theme={theme} onChange={(value) => onConfigChange("videoSeconds", value)} /> : <div className="text-xs opacity-60">参考图会上传至已配置的图床，供视频模型读取。</div>}
                         </SettingGroup>
                         {audioGenerationEnabled ? <AudioGenerationSetting checked={generateAudio} theme={theme} onChange={(checked) => onConfigChange("videoGenerateAudio", String(checked))} /> : null}
-                        <SettingGroup title="输出" color={theme.node.muted}>
+                        {!media ? <SettingGroup title="输出" color={theme.node.muted}>
                             <div className="grid gap-2 rounded-xl border p-2.5" style={{ borderColor: theme.node.stroke }}>
                                 <SwitchRow label="添加水印" checked={watermark} theme={theme} onChange={(checked) => onConfigChange("videoWatermark", String(checked))} />
                             </div>
-                        </SettingGroup>
+                        </SettingGroup> : null}
                     </>
                 ) : null}
             </div>

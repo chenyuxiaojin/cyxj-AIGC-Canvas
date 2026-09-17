@@ -1,7 +1,7 @@
 # 无限画布自主分支二次开发与治理指南
 
 > 状态：生效中。
-> 适用仓库：`github.com/chenyuxiaojin/infinite-canvas`（本地路径：`~/项目/自己的应用/infinite-canvas`）。
+> 适用仓库：`github.com/chenyuxiaojin/cyxj-AIGC-Canvas`（本地路径：`~/项目/自己的应用/小陈的画布`）。
 
 ---
 

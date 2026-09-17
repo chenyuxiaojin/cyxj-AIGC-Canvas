@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { registerDirectorExecutor } from "@/services/canvas-director-commands";
+
 import type { CanvasDirectorCapture, CanvasDirectorPanorama, CanvasDirectorVideo } from "../types";
 
 type PanoramaRemoval = Pick<CanvasDirectorPanorama, "edgeId" | "sourceNodeId">;
@@ -122,6 +124,23 @@ export function CanvasDirector({
         if (!ready || !sessionSentRef.current) return;
         postToDesk("storyai:director-panoramas", { panoramas });
     }, [panoramas, postToDesk, ready]);
+
+    useEffect(() => {
+        if (!ready || !sessionSentRef.current) return;
+        const cancellations = new Set<() => void>();
+        const unregister = registerDirectorExecutor({ nodeId, execute: (requestId, action, args) => new Promise((resolve, reject) => {
+            const cleanup = () => { clearTimeout(timer); window.removeEventListener("message", receive); cancellations.delete(cancel); };
+            const cancel = () => { cleanup(); reject(new Error("导演台已关闭，任务结果未确认")); };
+            const timer = setTimeout(() => { cleanup(); reject(new Error("导演台执行超时，请核对任务与素材")); }, 15 * 60 * 1000);
+            const receive = (event: MessageEvent) => {
+                if (event.origin !== window.location.origin || event.source !== iframeRef.current?.contentWindow || event.data?.type !== "storyai:director-command-result" || event.data?.requestId !== requestId) return;
+                cleanup(); resolve(event.data.payload);
+            };
+            cancellations.add(cancel); window.addEventListener("message", receive);
+            iframeRef.current?.contentWindow?.postMessage({ type: "storyai:director-command", requestId, action, arguments: args }, window.location.origin);
+        }) });
+        return () => { unregister(); for (const cancel of [...cancellations]) cancel(); };
+    }, [nodeId, ready]);
 
     return (
         <div className="fixed inset-0 z-[2000]">

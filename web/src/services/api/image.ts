@@ -1235,7 +1235,8 @@ export async function fetchImageModels(config: AiConfig) {
     if (isMiniMaxChannel(channel)) return [...miniMaxModels];
     if (isMimoChannel(channel || { baseUrl: config.baseUrl })) return [...mimoModels];
     try {
-        const response = await axios.get<{ data?: Array<{ id?: string }>; error?: { message?: string } }>(buildApiUrl(config.baseUrl, "/models"), {
+        const { localVideoGatewayUrl } = await import("@/lib/local-video-gateway");
+        const response = await axios.get<{ data?: Array<{ id?: string }>; error?: { message?: string } }>(localVideoGatewayUrl(buildApiUrl(config.baseUrl, "/models")), {
             headers: {
                 Authorization: `Bearer ${config.apiKey}`,
             },

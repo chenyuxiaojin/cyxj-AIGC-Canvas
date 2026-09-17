@@ -12,7 +12,7 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 use crate::BridgeError;
 
-const DESKTOP_LOCAL_USER_ID: &str = "desktop-local";
+pub(crate) const DESKTOP_LOCAL_USER_ID: &str = "desktop-local";
 const MAX_OPERATIONS: usize = 100;
 const MAX_TEXT_BYTES: usize = 100_000;
 
@@ -39,6 +39,11 @@ pub struct CanvasSize {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CanvasOperation {
+    CreateNode { node: Value },
+    UpdateNode { node_id: String, patch: Value },
+    DeleteNode { node_id: String },
+    SetGroupMembers { group_id: String, node_ids: Vec<String> },
+    UpdateProject { patch: Value },
     CreateTextNode {
         node_id: String,
         title: String,
@@ -108,6 +113,8 @@ pub struct ProjectDocument {
 }
 
 pub trait CanvasOperationAdapter: Send + Sync {
+    fn write_transfer(&self, _project:&str, _bytes:&[u8])->Result<Value,BridgeError> { Err(BridgeError::unavailable("素材传输不可用。")) }
+    fn read_transfer(&self, _project:&str, _id:&str)->Result<Vec<u8>,BridgeError> { Err(BridgeError::unavailable("素材传输不可用。")) }
     fn list_projects(&self) -> Result<Vec<ProjectSummary>, BridgeError>;
     fn get_project(&self, project_id: &str) -> Result<ProjectDocument, BridgeError>;
     fn apply_operations(
@@ -115,6 +122,19 @@ pub trait CanvasOperationAdapter: Send + Sync {
         request: AgentOperationRequest,
         dry_run: bool,
     ) -> Result<CanvasOperationResult, BridgeError>;
+    fn project_action(&self, _project_id: &str, _request: &Value) -> Result<Value, BridgeError> {
+        Err(BridgeError::unavailable("当前执行器未提供项目操作。"))
+    }
+    fn submit_command(&self, _request: crate::CanvasCommandRequest) -> Result<Value, BridgeError> {
+        Err(BridgeError::unavailable("当前执行器未提供画布任务。"))
+    }
+    fn list_commands(&self, _project_id: &str, _offset: u32) -> Result<Value, BridgeError> { Err(BridgeError::unavailable("此适配器未接入任务列表。")) }
+    fn command_status(&self, _project_id: &str, _request_id: &str) -> Result<Value, BridgeError> {
+        Err(BridgeError::not_found("画布任务不存在。"))
+    }
+    fn cancel_command(&self, _project_id: &str, _request_id: &str) -> Result<Value, BridgeError> {
+        Err(BridgeError::not_found("画布任务不存在。"))
+    }
 }
 
 pub struct SqliteCanvasAdapter {
@@ -143,6 +163,7 @@ impl SqliteCanvasAdapter {
                 ON agent_operation_requests(project_id, created_at);",
         )?;
         crate::history::initialize(&connection)?;
+        crate::commands::initialize(&connection)?;
         Ok(adapter)
     }
 
@@ -294,7 +315,7 @@ impl SqliteCanvasAdapter {
         Ok(deleted)
     }
 
-    fn connect(&self) -> Result<Connection, BridgeError> {
+    pub(crate) fn connect(&self) -> Result<Connection, BridgeError> {
         let connection = Connection::open(&self.database_path)?;
         connection.busy_timeout(Duration::from_secs(5))?;
         Ok(connection)
@@ -302,6 +323,33 @@ impl SqliteCanvasAdapter {
 }
 
 impl CanvasOperationAdapter for SqliteCanvasAdapter {
+    fn write_transfer(&self, project:&str, bytes:&[u8])->Result<Value,BridgeError> { crate::transfers::write(self,project,bytes) }
+    fn read_transfer(&self, project:&str, id:&str)->Result<Vec<u8>,BridgeError> { crate::transfers::read(self,project,id) }
+    fn submit_command(&self, request: crate::CanvasCommandRequest) -> Result<Value, BridgeError> { crate::commands::submit(self, request) }
+    fn list_commands(&self, project_id: &str, offset: u32) -> Result<Value, BridgeError> { self.command_history(project_id,offset) }
+    fn command_status(&self, project_id: &str, request_id: &str) -> Result<Value, BridgeError> { crate::commands::status(self, project_id, request_id) }
+    fn cancel_command(&self, project_id: &str, request_id: &str) -> Result<Value, BridgeError> { crate::commands::cancel(self, project_id, request_id) }
+    fn project_action(&self, id: &str, request: &Value) -> Result<Value, BridgeError> {
+        validate_identifier("project_id", id, 64)?;
+        match request["action"].as_str().unwrap_or_default() {
+            "create" => {
+                let now=now_rfc3339()?;
+                let title=request["title"].as_str().unwrap_or("未命名画布");
+                validate_text("title",title,256)?;
+                let mut project=json!({"id":id,"title":title,"createdAt":now,"updatedAt":now,"nodes":[],"connections":[],"chatSessions":[],"activeChatId":null,"agentConfig":null,"autoTitlePending":false,"backgroundMode":"lines","showImageInfo":false,"viewport":{"x":0,"y":0,"k":1},"sidePanel":{"open":true,"width":320},"agentPanel":{"open":false,"width":390}});
+                if let Some(source)=request.get("project") {
+                    let source=source.as_object().ok_or_else(||BridgeError::invalid("导入项目必须是对象。"))?;
+                    for (key,value) in source { if !["id","createdAt","updatedAt","__desktopRevision","pendingAgentRequest"].contains(&key.as_str()) { project[key]=value.clone(); } }
+                }
+                self.save_human_project_checked(project,Some(""))?;
+                Ok(json!(self.get_project(id)?))
+            }
+            "history" => self.history_list(id),
+            "preview" => self.history_preview(id, request["sequence"].as_i64().ok_or_else(||BridgeError::invalid("缺少历史版本编号。"))?),
+            "restore" => self.history_restore(id, request["sequence"].as_i64().ok_or_else(||BridgeError::invalid("缺少历史版本编号。"))?,request["base_revision"].as_str().ok_or_else(||BridgeError::invalid("缺少 base_revision。"))?,request["request_id"].as_str().ok_or_else(||BridgeError::invalid("缺少 request_id。"))?),
+            _ => Err(BridgeError::invalid("项目操作必须是 create、history、preview 或 restore。"))
+        }
+    }
     fn list_projects(&self) -> Result<Vec<ProjectSummary>, BridgeError> {
         let connection = self.connect()?;
         let mut statement = connection.prepare(
@@ -455,7 +503,8 @@ impl CanvasOperationAdapter for SqliteCanvasAdapter {
                 "The canvas changed while the Agent operation was being applied.",
             ));
         }
-        crate::history::record_save(&transaction, DESKTOP_LOCAL_USER_ID, &request.project_id, Some(&raw), &proposed_raw)?;
+        crate::history::record(&transaction, DESKTOP_LOCAL_USER_ID, &request.project_id, &raw, "agent_before", None)?;
+        crate::history::record(&transaction, DESKTOP_LOCAL_USER_ID, &request.project_id, &proposed_raw, "agent", None)?;
         let response_json = serde_json::to_string(&result)
             .map_err(|_| BridgeError::internal("The operation result could not be recorded."))?;
         transaction.execute(
@@ -545,6 +594,11 @@ fn apply_to_project(
     project_metadata(&project)?;
     for operation in operations {
         match operation {
+            CanvasOperation::CreateNode { node } => crate::operations::create_node(&mut project, node.clone())?,
+            CanvasOperation::UpdateNode { node_id, patch } => crate::operations::update_node(&mut project, node_id, patch)?,
+            CanvasOperation::DeleteNode { node_id } => crate::operations::delete_node(&mut project, node_id)?,
+            CanvasOperation::SetGroupMembers { group_id, node_ids } => crate::operations::set_group_members(&mut project, group_id, node_ids)?,
+            CanvasOperation::UpdateProject { patch } => crate::operations::update_project(&mut project, patch)?,
             CanvasOperation::CreateTextNode {
                 node_id,
                 title,
@@ -581,8 +635,7 @@ fn apply_to_project(
             }
             CanvasOperation::MoveNode { node_id, position } => {
                 validate_point(position)?;
-                let node = editable_node(&mut project, node_id)?;
-                node["position"] = json!({ "x": position.x, "y": position.y });
+                crate::operations::update_node(&mut project, node_id, &json!({"position":position}))?;
             }
             CanvasOperation::SetNodeText {
                 node_id,
@@ -666,10 +719,12 @@ fn apply_to_project(
             }
         }
     }
+    project_metadata(&project)?;
+    crate::operations::validate_groups(&project)?;
     Ok(project)
 }
 
-fn editable_node<'a>(project: &'a mut Value, node_id: &str) -> Result<&'a mut Value, BridgeError> {
+pub(crate) fn editable_node<'a>(project: &'a mut Value, node_id: &str) -> Result<&'a mut Value, BridgeError> {
     validate_identifier("node_id", node_id, 64)?;
     let nodes = project["nodes"]
         .as_array_mut()
@@ -686,7 +741,7 @@ fn editable_node<'a>(project: &'a mut Value, node_id: &str) -> Result<&'a mut Va
     Ok(node)
 }
 
-fn ensure_node_editable(project: &Value, node_id: &str) -> Result<(), BridgeError> {
+pub(crate) fn ensure_node_editable(project: &Value, node_id: &str) -> Result<(), BridgeError> {
     let nodes = project["nodes"]
         .as_array()
         .ok_or_else(|| BridgeError::invalid("The canvas project nodes field is invalid."))?;
@@ -708,7 +763,7 @@ fn node_locked(node: &Value) -> bool {
         || node["metadata"]["agentLocked"].as_bool() == Some(true)
 }
 
-fn validate_identifier(label: &str, value: &str, max: usize) -> Result<(), BridgeError> {
+pub(crate) fn validate_identifier(label: &str, value: &str, max: usize) -> Result<(), BridgeError> {
     if !valid_identifier(value, max) {
         return Err(BridgeError::invalid(format!("{label} is invalid.")));
     }
@@ -723,14 +778,14 @@ fn valid_identifier(value: &str, max: usize) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
 }
 
-fn validate_text(label: &str, value: &str, max: usize) -> Result<(), BridgeError> {
+pub(crate) fn validate_text(label: &str, value: &str, max: usize) -> Result<(), BridgeError> {
     if value.len() > max || (label == "title" && value.trim().is_empty()) {
         return Err(BridgeError::invalid(format!("{label} is invalid.")));
     }
     Ok(())
 }
 
-fn validate_point(point: &Point) -> Result<(), BridgeError> {
+pub(crate) fn validate_point(point: &Point) -> Result<(), BridgeError> {
     if !point.x.is_finite()
         || !point.y.is_finite()
         || point.x.abs() > 10_000_000.0
@@ -743,7 +798,7 @@ fn validate_point(point: &Point) -> Result<(), BridgeError> {
     Ok(())
 }
 
-fn validate_size(size: &CanvasSize) -> Result<(), BridgeError> {
+pub(crate) fn validate_size(size: &CanvasSize) -> Result<(), BridgeError> {
     if !size.width.is_finite()
         || !size.height.is_finite()
         || !(40.0..=10_000.0).contains(&size.width)
@@ -770,7 +825,7 @@ fn revision(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn now_rfc3339() -> Result<String, BridgeError> {
+pub(crate) fn now_rfc3339() -> Result<String, BridgeError> {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .map_err(|_| BridgeError::internal("The current timestamp could not be encoded."))

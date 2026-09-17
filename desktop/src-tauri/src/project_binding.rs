@@ -169,7 +169,13 @@ pub fn resolve_canvas_project_workspace(
 }
 
 #[tauri::command]
-pub fn select_film_directory(app: AppHandle) -> Result<Option<String>, String> {
+pub async fn select_film_directory(app: AppHandle) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || pick_film_directory(app))
+        .await
+        .map_err(|error| format!("无法打开片子目录选择框：{error}"))?
+}
+
+fn pick_film_directory(app: AppHandle) -> Result<Option<String>, String> {
     let root = default_workflow_root()?;
     let mut dialog = app.dialog().file().set_title("选择这部片子的目录");
     if root.is_dir() {

@@ -6,6 +6,9 @@ mod client;
 mod error;
 pub mod history;
 mod mcp;
+mod operations;
+pub mod commands;
+pub mod transfers;
 mod project_binding;
 mod runtime;
 mod server;
@@ -24,3 +27,4 @@ pub use project_binding::{
 };
 pub use runtime::{AgentRuntime, TestClipRequest};
 pub use server::{BridgeServer, BRIDGE_PORT};
+pub use commands::CanvasCommandRequest;

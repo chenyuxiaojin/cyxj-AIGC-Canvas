@@ -240,12 +240,12 @@ function generationLabel(type: NodeGenerationInput["type"], index: number) {
 }
 
 function readReferenceImage(node: CanvasNodeData): ReferenceImage | null {
-    if (!isCanvasImageNodeType(node.type) || !node.metadata?.content) return null;
+    if (!isCanvasImageNodeType(node.type) || !(node.metadata?.content || node.metadata?.storageKey)) return null;
     return {
         id: node.id,
         name: `image-${node.id}.png`,
         type: node.metadata.mimeType || "image/png",
-        dataUrl: node.metadata.content,
+        dataUrl: node.metadata.content || "",
         storageKey: node.metadata.storageKey,
     };
 }

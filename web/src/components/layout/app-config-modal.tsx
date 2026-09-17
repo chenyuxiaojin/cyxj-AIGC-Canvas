@@ -14,7 +14,7 @@ import { isGeminiConfig, isGeminiTtsModel } from "@/lib/gemini";
 import { geminiTtsVoiceOptions, normalizeGeminiTtsVoice } from "@/lib/gemini-tts";
 import { isMimoPresetTtsModel, isMimoTtsModel, isMimoVoiceCloneModel, isMimoVoiceDesignModel, mimoTtsFormatOptions, mimoTtsVoiceOptions } from "@/lib/mimo-tts";
 import { modelChannelApiKeyUrls, modelChannelDefaultBaseUrls } from "@/lib/model-channel";
-import { filterChannelModelsByCapability, normalizeLocalChannels, useConfigStore, useEffectiveConfig, type AiConfig, type LocalModelChannel, type ModelCapability } from "@/stores/use-config-store";
+import { buildApiUrl, filterChannelModelsByCapability, normalizeLocalChannels, useConfigStore, useEffectiveConfig, type AiConfig, type LocalModelChannel, type ModelCapability } from "@/stores/use-config-store";
 
 type ModelGroup = {
     capability: ModelCapability;
@@ -208,7 +208,14 @@ export function AppConfigModal() {
                                         ) : null}
                                     </div>
                                 </div>
-                                <div className="text-xs text-stone-500">已保存 {channel.models.length} 个模型</div>
+                                <div className="flex flex-wrap items-center gap-2 text-xs text-stone-500">
+                                    <span>已保存 {channel.models.length} 个模型</span>
+                                    {channel.protocol === "openai" ? <>
+                                        <span>视频接口</span>
+                                        <Select size="small" aria-label={`${channel.name}视频接口`} value={channel.videoApiMode || "videos"} options={[{ label: "视频任务", value: "videos" }, { label: "OpenAI 对话", value: "chat" }, { label: "Seedance 媒体", value: "media" }]} onChange={(videoApiMode: "videos" | "chat" | "media") => patchLocalChannel(channel.id, { videoApiMode })} />
+                                        {channel.baseUrl ? <span className="break-all">{buildApiUrl(channel.baseUrl, channel.videoApiMode === "media" ? "/media/videos" : channel.videoApiMode === "chat" ? "/chat/completions" : "/videos")}</span> : null}
+                                    </> : null}
+                                </div>
                             </div>
                         ))}
                     </div>
