@@ -86,7 +86,6 @@ type CanvasAssistantPanelProps = {
 type PendingDeleteConfirmation = {
     permission?: boolean;
     title: string;
-    media?: boolean;
     resolve: (confirmed: boolean) => void;
 };
 
@@ -604,9 +603,9 @@ export function CanvasAssistantPanel({
                             </span> : null}
                         </div>
                         {provider === "api" ? <div className="truncate">{effectiveConfig.textModel || effectiveConfig.model || "尚未配置文本模型"}</div> : null}
-                        {provider === "grok" || provider === "antigravity" ? <div>{activeSession?.localAgentModel || "模型尚未由本机工具报告"} · 使用本机登录 · 文字对话 · 画布生成按项目授权</div> : null}
+                        {provider === "grok" || provider === "antigravity" ? <div>{activeSession?.localAgentModel || "模型尚未由本机工具报告"} · 使用本机登录 · 文字对话 · 生成请求直接执行</div> : null}
                         {provider === "codex" ? <>
-                            <div className="truncate">{activeSession?.codexModel || "使用本机 Codex 的 ChatGPT 登录"} · 画布生成按项目授权</div>
+                            <div className="truncate">{activeSession?.codexModel || "使用本机 Codex 的 ChatGPT 登录"} · 生成请求直接执行</div>
                             {contextPercent !== null && contextPercent >= 70 ? <div role="status" style={{ color: theme.node.text }}>
                                 {contextPercent >= 85 ? "上下文接近上限；Codex 可能进行摘要压缩，重要定稿请保存在节点中。" : "上下文已超过 70%，建议完成当前阶段后新建对话。"}
                             </div> : null}
@@ -681,12 +680,12 @@ export function CanvasAssistantPanel({
                         {pendingDelete ? (
                             <div className="mx-2 mb-2 overflow-hidden rounded-xl border" style={{ background: theme.node.fill, borderColor: theme.node.stroke }}>
                                 <div className="min-w-0 px-3 py-2.5">
-                                    <div className={pendingDelete.permission ? "max-h-48 overflow-auto whitespace-pre-wrap break-all text-sm font-medium" : "truncate text-sm font-medium"}>{pendingDelete.permission ? "允许本次操作" : pendingDelete.media ? "生成" : "删除"}「{pendingDelete.title}」？</div>
-                                    <div className="mt-0.5 text-xs opacity-55">{pendingDelete.permission ? "这是 Grok 请求的本次工具权限，请核对操作内容；取消后不会自动重试。" : pendingDelete.media ? "会调用已配置的媒体服务，可能消耗额度；本次确认只执行这一项。" : "相关连线和任务记录将按现有逻辑清理"}</div>
+                                    <div className={pendingDelete.permission ? "max-h-48 overflow-auto whitespace-pre-wrap break-all text-sm font-medium" : "truncate text-sm font-medium"}>{pendingDelete.permission ? "允许本次操作" : "删除"}「{pendingDelete.title}」？</div>
+                                    <div className="mt-0.5 text-xs opacity-55">{pendingDelete.permission ? "这是 Grok 请求的本次工具权限，请核对操作内容；取消后不会自动重试。" : "相关连线和任务记录将按现有逻辑清理"}</div>
                                 </div>
                                 <div className="grid grid-cols-2 border-t" style={{ borderColor: theme.node.stroke }}>
                                     <button type="button" className="h-9 cursor-pointer border-0 bg-transparent text-sm" style={{ color: theme.node.text }} onClick={() => settleDeleteConfirmation(false)}>取消</button>
-                                    <button type="button" className="h-9 cursor-pointer border-0 border-l bg-transparent text-sm font-medium" style={{ borderColor: theme.node.stroke, color: pendingDelete.media || pendingDelete.permission ? theme.node.text : "#ef4444" }} onClick={() => settleDeleteConfirmation(true)}>{pendingDelete.permission ? "允许一次" : pendingDelete.media ? "确认生成" : "确认删除"}</button>
+                                    <button type="button" className="h-9 cursor-pointer border-0 border-l bg-transparent text-sm font-medium" style={{ borderColor: theme.node.stroke, color: pendingDelete.permission ? theme.node.text : "#ef4444" }} onClick={() => settleDeleteConfirmation(true)}>{pendingDelete.permission ? "允许一次" : "确认删除"}</button>
                                 </div>
                             </div>
                         ) : null}
