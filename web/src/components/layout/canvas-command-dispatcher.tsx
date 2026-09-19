@@ -1,22 +1,17 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { App, Button, Checkbox, Modal } from "antd";
-import { isDesktopRuntime } from "@/services/desktop-runtime";
-import { approveCanvasCommand, claimCanvasCommand, currentCanvasExecutor, finishCanvasCommand, listCanvasCommands, getCanvasCommand, readCanvasDocument, type CanvasCommand } from "@/services/canvas-commands";
+import { App } from "antd";
+import { isDesktopRuntime, canvasPersistenceError } from "@/services/desktop-runtime";
+import { claimCanvasCommand, currentCanvasExecutor, finishCanvasCommand, listCanvasCommands, getCanvasCommand, readCanvasDocument, type CanvasCommand } from "@/services/canvas-commands";
 import { useCanvasStore } from "@/app/(user)/canvas/stores/use-canvas-store";
 
 export function CanvasCommandDispatcher() {
     const router = useRouter();
     const { message } = App.useApp();
-    const [pending, setPending] = useState<CanvasCommand | null>(null);
-    const [preview, setPreview] = useState<ReturnType<NonNullable<ReturnType<typeof currentCanvasExecutor>>["preview"]> | null>(null);
-    const [remember, setRemember] = useState(false);
     const running = useRef(false);
     const opening = useRef<CanvasCommand | null>(null);
-    const pendingRef = useRef(pending);
-    pendingRef.current = pending;
 
     useEffect(() => {
         if (!isDesktopRuntime()) return;
@@ -29,19 +24,40 @@ export function CanvasCommandDispatcher() {
             try {
                 const tasks = await listCanvasCommands();
                 if (stopped) return;
-                if (pendingRef.current && !tasks.some((task) => task.task_id === pendingRef.current?.task_id && task.status === "pending_approval")) setPending(null);
+                // Recovery commands must remain reachable while ordinary flush is blocked.
+                const recovery = tasks.find((task) => task.status === "queued" && ["save_inspect", "save_use_latest", "save_copy"].includes(task.request.action));
+                if (recovery && !running.current) {
+                    running.current = true;
+                    try {
+                        await claimCanvasCommand(recovery);
+                        const store = useCanvasStore.getState();
+                        const result = recovery.request.action === "save_inspect"
+                            ? await store.inspectSaveConflict(recovery.project_id)
+                            : await store.resolveSaveConflict(recovery.project_id, recovery.request.action === "save_copy" ? "copy" : "latest", String(recovery.request.arguments.draftToken || ""), recovery.task_id);
+                        await finishCanvasCommand(recovery, { ok: true, ...result });
+                    } catch (error) {
+                        const parsed = canvasPersistenceError(error);
+                        await finishCanvasCommand(recovery, { ok: false, code: parsed.code, message: parsed.message });
+                    } finally { running.current = false; }
+                    return;
+                }
                 const active = currentCanvasExecutor();
                 if (opening.current && active?.projectId === opening.current.project_id) {
-                    await active.flush();
+                    if (!["conflict", "error", "resolving"].includes(useCanvasStore.getState().saveStatus[active.projectId]?.state)) await active.flush();
                     await finishCanvasCommand(opening.current, { ok: true, projectId: active.projectId });
                     opening.current = null;
                 }
-                const approval = tasks.find((task) => task.status === "pending_approval" && task.project_id === active?.projectId);
-                if (approval && !pendingRef.current) {
-                    setRemember(false);
-                    setPreview(active?.preview(approval) || null);
-                    setPending(approval);
+                const openRequest = tasks.find((task) => task.status === "queued" && task.request.action === "open_project");
+                if (openRequest && !running.current && !opening.current) {
+                    // Leaving one conflicted canvas must not block unrelated projects.
+                    if (active) await active.flush().catch(() => undefined);
+                    await claimCanvasCommand(openRequest);
+                    opening.current = openRequest;
+                    router.push(`/canvas/${encodeURIComponent(openRequest.project_id)}`);
+                    return;
                 }
+                const saveState = active && useCanvasStore.getState().saveStatus[active.projectId]?.state;
+                if (saveState === "conflict" || saveState === "resolving") return;
                 if (running.current || opening.current || active?.busy()) return;
                 // Only accept a remote document when the current editor has no unsaved work.
                 if (active && useCanvasStore.getState().saveStatus[active.projectId]?.state === "saved") {
@@ -50,21 +66,10 @@ export function CanvasCommandDispatcher() {
                     if (currentCanvasExecutor() !== active || active.busy()) return;
                     if (document.revision !== local?.__desktopRevision) await active.sync(document);
                 }
-                const next = tasks.find((task) => task.status === "queued" && (task.request.action === "open_project" || task.project_id === active?.projectId));
+                const next = tasks.find((task) => task.status === "queued" && task.project_id === active?.projectId);
                 if (!next) return;
                 if (active) await active.flush();
                 await claimCanvasCommand(next);
-                if (next.request.action === "open_project") {
-                    opening.current = next;
-                    if (active?.projectId === next.project_id) {
-                        await finishCanvasCommand(next, { ok: true, projectId: next.project_id });
-                        opening.current = null;
-                    } else {
-                        opening.current = next;
-                        router.push(`/canvas/${encodeURIComponent(next.project_id)}`);
-                    }
-                    return;
-                }
                 if (!active) return;
                 running.current = true;
                 void (async () => {
@@ -114,40 +119,5 @@ export function CanvasCommandDispatcher() {
         };
     }, [message, router]);
 
-    const approve = async (allow: boolean) => {
-        if (!pending) return;
-        try {
-            await approveCanvasCommand(pending, allow, remember);
-            setPending(null);
-        } catch (error) {
-            void message.error(String(error));
-        }
-    };
-    return (
-        <Modal
-            open={Boolean(pending)}
-            title="允许画布生成任务"
-            onCancel={() => void approve(false)}
-            footer={[
-                <Button key="cancel" onClick={() => void approve(false)}>
-                    取消任务
-                </Button>,
-                <Button key="approve" type="primary" onClick={() => void approve(true)}>
-                    允许生成
-                </Button>,
-            ]}
-        >
-            <p>{preview?.prompt || String(pending?.request.arguments.title || pending?.request.action || "")}</p>
-            {preview && (
-                <p>
-                    模型：{preview.model || "尚未配置"} · 数量：{preview.quantity} · 尺寸：{preview.size}
-                    {preview.seconds ? ` · 时长：${preview.seconds} 秒` : ""}
-                </p>
-            )}
-            <p>将使用此画布的模型、渠道及参考素材，费用由对应服务收取。</p>
-            <Checkbox checked={remember} onChange={(event) => setRemember(event.target.checked)}>
-                允许本项目后续生成任务（可在画布中关闭）
-            </Checkbox>
-        </Modal>
-    );
+    return null;
 }

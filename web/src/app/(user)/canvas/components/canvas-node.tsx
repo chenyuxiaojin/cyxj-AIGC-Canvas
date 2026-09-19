@@ -6,7 +6,6 @@ import dynamic from "next/dynamic";
 import { CheckCircle2, ChevronRight, Image as ImageIcon, LockKeyhole, LockKeyholeOpen, Music2, Pause, Play, RefreshCw, Scissors, Settings2, Sparkles, Star, Video } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
-import { approvePaidGeneration, rejectPaidGeneration } from "@/services/desktop-runtime";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { hasCanvasImageSource } from "@/services/canvas-local-image";
@@ -744,8 +743,6 @@ function VideoNodeContent({ node, theme, isSelected, mediaLite }: NodeContentRen
     const videoRef = useRef<HTMLVideoElement>(null);
     const [isPlaying, setIsPlaying] = useState(false);
     const [mediaDurationMs, setMediaDurationMs] = useState(0);
-    const [approvalBusy, setApprovalBusy] = useState<"approve" | "reject" | null>(null);
-    const [approvalError, setApprovalError] = useState<string | null>(null);
 
     const effectiveDurationMs = mediaDurationMs || node.metadata?.durationMs || 6000;
     const trimInMs = node.metadata?.trimInMs ?? 0;
@@ -789,56 +786,7 @@ function VideoNodeContent({ node, theme, isSelected, mediaLite }: NodeContentRen
     }, [isSelected, node.metadata?.content]);
 
     if (!node.metadata?.content && node.metadata?.status === "pending_approval") {
-        const taskId = node.metadata?.localCanvasTaskId;
-        const cost = node.metadata?.estimatedCostYuan;
-        const decide = async (action: "approve" | "reject") => {
-            if (!taskId || approvalBusy) return;
-            setApprovalBusy(action);
-            setApprovalError(null);
-            try {
-                const projectId = decodeURIComponent(window.location.pathname.split("/").filter(Boolean).pop() || "");
-                if (action === "approve") await approvePaidGeneration(projectId, taskId);
-                else await rejectPaidGeneration(projectId, taskId);
-            } catch (error) {
-                setApprovalError(error instanceof Error ? error.message : String(error));
-                setApprovalBusy(null);
-            }
-        };
-        return (
-            <div className="flex h-full w-full flex-col justify-between gap-2 p-3 text-left" data-canvas-no-zoom>
-                <div style={{ color: theme.node.placeholder }}>
-                    <div className="text-xs font-medium">待批准 · 付费生成{typeof cost === "number" ? ` · 预计 ¥${cost.toFixed(2)}` : ""}</div>
-                    <div className="mt-1 line-clamp-4 text-xs opacity-70">{node.metadata?.prompt}</div>
-                </div>
-                {approvalError ? <div className="text-xs text-red-400">{approvalError}</div> : null}
-                <div className="flex gap-2">
-                    <button
-                        type="button"
-                        className="flex-1 rounded-lg px-2 py-1.5 text-xs transition-opacity disabled:opacity-50"
-                        style={{ background: theme.toolbar.activeBg, color: theme.toolbar.item }}
-                        disabled={Boolean(approvalBusy)}
-                        onClick={(event) => {
-                            event.stopPropagation();
-                            void decide("approve");
-                        }}
-                    >
-                        {approvalBusy === "approve" ? "已批准，启动中…" : "批准生成"}
-                    </button>
-                    <button
-                        type="button"
-                        className="rounded-lg px-2 py-1.5 text-xs opacity-70 transition-opacity disabled:opacity-50"
-                        style={{ color: theme.node.placeholder }}
-                        disabled={Boolean(approvalBusy)}
-                        onClick={(event) => {
-                            event.stopPropagation();
-                            void decide("reject");
-                        }}
-                    >
-                        {approvalBusy === "reject" ? "已拒绝" : "拒绝"}
-                    </button>
-                </div>
-            </div>
-        );
+        return <div className="p-3 text-xs" style={{ color: theme.node.placeholder }}>历史未提交任务已保留；升级不会自动执行。需要生成时可重新发起。</div>;
     }
 
     if (!source.src)

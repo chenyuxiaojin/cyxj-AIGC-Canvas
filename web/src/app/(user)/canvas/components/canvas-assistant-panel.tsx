@@ -2,7 +2,6 @@
 
 import { type CSSProperties, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
-    Settings2,
     History,
     Bot,
     PanelRightClose,
@@ -14,7 +13,7 @@ import {
     Video,
     X,
 } from "lucide-react";
-import { Button, Modal, Switch, Tooltip } from "antd";
+import { Button, Modal, Tooltip } from "antd";
 import { motion } from "motion/react";
 import { nanoid } from "nanoid";
 import { useCopyText } from "@/hooks/use-copy-text";
@@ -26,7 +25,6 @@ import { CanvasTerminalDrawer } from "./canvas-terminal-drawer";
 
 import { ImageGenerationPending } from "@/components/image-generation-pending";
 import { isTauri } from "@tauri-apps/api/core";
-import { CanvasCommandPermissionsSetting } from "./canvas-command-permissions";
 import { codexContextPercent } from "@/services/canvas-codex";
 import { ensureCanvasAgentWorkspace } from "@/services/desktop-terminal";
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -133,7 +131,6 @@ export function CanvasAssistantPanel({
     const [isRunning, setIsRunning] = useState(false);
     const [checkedChatIds, setCheckedChatIds] = useState<string[]>([]);
     const [deleteChatIds, setDeleteChatIds] = useState<string[]>([]);
-    const [settingsOpen, setSettingsOpen] = useState(false);
     const [closing, setClosing] = useState(false);
     const [resizing, setResizing] = useState(false);
     const [composerReferenceIds, setComposerReferenceIds] = useState<string[]>([]);
@@ -379,7 +376,7 @@ export function CanvasAssistantPanel({
                 getContext: getAgentContext,
                 executeAction: async (action: CanvasAgentAction): Promise<CanvasAgentToolResult> => {
                     if (controller.signal.aborted) throw new DOMException("已停止", "AbortError");
-                    if (isTauri() && isCanvasAgentMediaAction(action)) return onExecuteAction(action, messageReferenceNodeIds);
+                    if (isCanvasAgentMediaAction(action)) return onExecuteAction(action, messageReferenceNodeIds);
                     const media = provider !== "api" && isCanvasAgentMediaAction(action);
                     const connectionDelete = provider !== "api" && action.name === "delete_connection";
                     if (action.name !== "delete_node" && !media && !connectionDelete) { const result = await onExecuteAction(action, messageReferenceNodeIds); onAgentActionResult({ batchId, action, result }); return result; }
@@ -579,7 +576,6 @@ export function CanvasAssistantPanel({
                                 />
                             </Tooltip>
                         )}
-                        <Tooltip title="Agent 设置"><Button type="text" shape="circle" style={iconButtonStyle} icon={<Settings2 className="size-4" />} onClick={() => setSettingsOpen(true)} /></Tooltip>
                         <Tooltip title="收起面板">
                             <Button type="text" shape="circle" className="!h-8 !w-8 !min-w-8" style={iconButtonStyle} icon={<PanelRightClose className="size-4" />} onClick={collapse} />
                         </Tooltip>
@@ -719,23 +715,7 @@ export function CanvasAssistantPanel({
                     </>
                 ) : null}
 
-                <Modal
-                    title="Agent 设置"
-                    open={settingsOpen}
-                    centered
-                    width={520}
-                    onCancel={() => setSettingsOpen(false)}
-                    footer={<Button type="primary" onClick={() => setSettingsOpen(false)}>完成</Button>}
-                >
-                    <div className="flex items-center justify-between gap-6 py-2">
-                        <div className="min-w-0">
-                            <div className="text-sm font-medium">自动生成图片/视频/音频</div>
-                            <div className="mt-1 text-xs leading-5 opacity-55">开启后，Agent 可直接提交图片/视频/音频生成；关闭时仅创建并配置好节点供人工核准生成</div>
-                        </div>
-                        <Switch checked={Boolean(agentConfig.autoGenerateMedia)} onChange={(autoGenerateMedia) => onAgentConfigChange({ autoGenerateMedia })} />
-                    </div>
-                    {projectId && isTauri() ? <CanvasCommandPermissionsSetting projectId={projectId} /> : null}
-                </Modal>
+
 
                 <Modal
                     title="删除对话记录？"

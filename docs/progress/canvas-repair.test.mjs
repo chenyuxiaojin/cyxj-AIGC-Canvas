@@ -27,45 +27,46 @@ function load(path,imports,globals={}) {
  vm.runInContext(js,context);
  return module.exports;
 }
+const runtime=load('services/desktop-runtime.ts',{'@tauri-apps/api/core':{}});
 const canvasPath='app/(user)/canvas/';
 const graph=load(canvasPath+'utils/canvas-graph.ts',{});
 const original={id:'audit-film',title:'audit',createdAt:'2026-01-01T00:00:00Z',updatedAt:'2026-01-01T00:00:00Z',nodes:[{id:'n',type:'text',title:'原节点',position:{x:0,y:0},width:240,height:160,metadata:{content:'saved'}}],connections:[],chatSessions:[],viewport:{x:0,y:0,k:1},sidePanel:{open:true,width:320},agentPanel:{open:false,width:390},__desktopRevision:'base'};
 async function storeHarness({desktop=true,deleted=[],local=[original],storage,fail=false,database:initialDatabase}={}) {
  const values=storage||new Map([['infinite-canvas:canvas_store',JSON.stringify({state:{projects:local},version:0})]]);
- const database=initialDatabase||new Map([[original.id,structuredClone(original)]]);const writes=[];let failure=fail;let localFailure=false;let beforeSave=async()=>{};let response=value=>value;let beforeRestore=async()=>{};const restores=[];
- const service={restoreDesktopCanvasVersion:async(id,sequence,expectedRevision,requestId)=>{ restores.push({id,sequence,expectedRevision,requestId});await beforeRestore();const current=database.get(id);if(current.__desktopRevision!==expectedRevision)throw Error('REVISION_CONFLICT');const saved={...structuredClone(original),__desktopRevision:'restored-'+sequence};database.set(id,saved);return structuredClone(saved);},isDesktopRuntime:()=>desktop,loadDesktopCanvasDeletedIds:async()=>deleted,loadDesktopCanvasProjects:async()=>[...database.values()],saveDesktopCanvasProject:async project=>{
+ const database=initialDatabase||new Map([[original.id,structuredClone(original)]]);const writes=[];let failure=fail;let localFailure=false;let beforeSave=async()=>{};let response=value=>value;let beforeRestore=async()=>{};let beforeRead=async()=>{};let beforeLocalWrite=async()=>{};const restores=[];
+ const service={...runtime,restoreDesktopCanvasVersion:async(id,sequence,expectedRevision,requestId)=>{ restores.push({id,sequence,expectedRevision,requestId});await beforeRestore();const current=database.get(id);if(current.__desktopRevision!==expectedRevision)throw new runtime.CanvasPersistenceError('REVISION_CONFLICT','REVISION_CONFLICT');const saved={...structuredClone(original),__desktopRevision:'restored-'+sequence};database.set(id,saved);return structuredClone(saved);},isDesktopRuntime:()=>desktop,loadDesktopCanvasDeletedIds:async()=>deleted,loadDesktopCanvasProject:async id=>{await beforeRead(id);if(!database.has(id))throw new runtime.CanvasPersistenceError('NOT_FOUND','not found');return structuredClone(database.get(id))},loadDesktopCanvasProjects:async()=>({projects:[...database.values()].map(p=>structuredClone(p)),failures:[]}),saveDesktopCanvasProject:async project=>{
   writes.push(structuredClone(project));await beforeSave(project);if(failure)throw Error('injected disk failure');
-  const current=database.get(project.id);if(current&&current.__desktopRevision!==project.__desktopRevision)throw Error('REVISION_CONFLICT');
+  const current=database.get(project.id);if(current&&current.__desktopRevision!==project.__desktopRevision)throw new runtime.CanvasPersistenceError('REVISION_CONFLICT','REVISION_CONFLICT');
   const saved={...structuredClone(project),__desktopRevision:'revision-'+writes.length};database.set(project.id,saved);return response(structuredClone(saved));
  }};
  const {useCanvasStore:store}=load(canvasPath+'stores/use-canvas-store.ts',{
   zustand:{create},'zustand/middleware':{persist},nanoid:{nanoid:()=> 'recovered-film-'+(++requestSequence)},'fast-deep-equal':{default:requireWeb('fast-deep-equal')},'../utils/canvas-graph':graph,
-  '@/lib/localforage-storage':{localForageStorage:{getItem:async key=>values.get(key)||null,setItem:async(key,value)=>{if(localFailure)throw Error('injected local storage failure');values.set(key,value)},removeItem:async key=>{values.delete(key)}}},
+  '@/lib/localforage-storage':{canvasPersistenceStorage:{keys:async()=>[...values.keys()],getItem:async key=>values.get(key)||null,setItem:async(key,value)=>{await beforeLocalWrite(key,value);if(localFailure)throw Error('injected local storage failure');values.set(key,value)},removeItem:async key=>{values.delete(key)}}},
   '@/services/api/canvas-tasks':{},'@/services/api/user-config':{},'@/stores/use-user-store':{useUserStore:{getState:()=>({token:''})}},'@/services/desktop-runtime':service,
  });
  for(let n=0;n<100&&!store.getState().hydrated;n++)await tick(1);
  assert.equal(store.getState().hydrated,true);
- return {store,values,writes,database,restores,beforeRestore:hook=>{beforeRestore=hook},setFailure:value=>{failure=value},setLocalFailure:value=>{localFailure=value},beforeSave:hook=>{beforeSave=hook},response:hook=>{response=hook}};
+ return {store,values,writes,database,restores,beforeRead:hook=>{beforeRead=hook},beforeLocalWrite:hook=>{beforeLocalWrite=hook},beforeRestore:hook=>{beforeRestore=hook},setFailure:value=>{failure=value},setLocalFailure:value=>{localFailure=value},beforeSave:hook=>{beforeSave=hook},response:hook=>{response=hook}};
 }
 
 test('failed desktop save survives refresh and restart, then an explicit retry saves it',async()=>{
  const h=await storeHarness({fail:true});
  h.store.getState().updateProject(original.id,{nodes:[{id:'n',type:'text',title:'原节点',position:{x:0,y:0},width:240,height:160,metadata:{content:'keep my edit'}}]});
  await tick(460);assert.equal(h.store.getState().saveStatus[original.id].state,'error');
- await assert.rejects(h.store.getState().refreshFromDesktop(),/disk failure/);
+ await h.store.getState().refreshFromDesktop();
  assert.equal(h.store.getState().projects[0].nodes[0].metadata.content,'keep my edit');
  const restarted=await storeHarness({storage:h.values,fail:true});
  assert.equal(restarted.store.getState().projects[0].nodes[0].metadata.content,'keep my edit');
  restarted.setFailure(false);await restarted.store.getState().retrySave(original.id);
  assert.equal(restarted.database.get(original.id).nodes[0].metadata.content,'keep my edit');
- assert.deepEqual(JSON.parse(restarted.values.get('infinite-canvas:recovery:index')),[]);
+ assert.equal(restarted.values.has('infinite-canvas:save-journal:'+original.id),false);
 });
 
 test('refresh must not rebase pending edits onto another writer without a conflict',async()=>{
  const h=await storeHarness();
  h.store.getState().updateProject(original.id,{title:'my title',nodes:[{id:'n',type:'text',title:'原节点',position:{x:0,y:0},width:240,height:160,metadata:{content:'my edit'}}]});
  h.database.set(original.id,{...original,__desktopRevision:'someone-else',nodes:[{id:'n',type:'text',title:'原节点',position:{x:0,y:0},width:240,height:160,metadata:{content:'other edit'}}]});
- await assert.rejects(h.store.getState().refreshFromDesktop(),/REVISION_CONFLICT/);
+ await h.store.getState().refreshFromDesktop();assert.equal(h.store.getState().saveStatus[original.id].state,'conflict');
  assert.equal(h.database.get(original.id).nodes[0].metadata.content,'other edit');
  assert.equal(h.store.getState().projects[0].nodes[0].metadata.content,'my edit');
 });
@@ -136,7 +137,7 @@ test('a committed write with a lost reply is recovered only when every saved fie
  assert.equal(restarted.store.getState().projects[0].nodes[0].metadata.content,'already committed');
  assert.equal(restarted.store.getState().projects[0].__desktopRevision,'revision-1');
  await restarted.store.getState().retrySave(original.id);assert.equal(restarted.writes.length,0);
- assert.deepEqual(JSON.parse(restarted.values.get('infinite-canvas:recovery:index')),[]);
+ assert.equal(restarted.values.has('infinite-canvas:save-journal:'+original.id),false);
 });
 
 test('history restore flushes the current edit, receives the latest revision, and persists the restored snapshot',async()=>{
@@ -169,7 +170,7 @@ test('edits arriving during restore survive in recovery and cannot silently over
  await tick(450);assert.equal(h.writes.length,0);release();await assert.rejects(restoring,/恢复期间又有新编辑/);
  assert.equal(h.database.get(original.id).nodes[0].metadata.content,'saved');
  assert.equal(h.store.getState().projects[0].nodes[0].metadata.content,'edit while restoring');
- assert.equal(JSON.parse(h.values.get('infinite-canvas:recovery:project:'+original.id)).nodes[0].metadata.content,'edit while restoring');
+ assert.equal(JSON.parse(h.values.get('infinite-canvas:save-journal:'+original.id)).project.nodes[0].metadata.content,'edit while restoring');
  assert.equal(h.store.getState().saveStatus[original.id].state,'error');
  await assert.rejects(h.store.getState().retrySave(original.id),/REVISION_CONFLICT/);
 });
@@ -201,4 +202,93 @@ test('local-ref export embeds and hashes media; import remaps it and rejects mis
  const imported=await importer.importCanvasArchive(archive);assert.equal(imported[0].nodes[0].metadata.storageKey,'image:fresh-id');assert.equal(imported[0].nodes[0].metadata.content,'blob:fresh');assert.equal(imported[0].nodes[0].metadata.localMedia,undefined);
  assert.deepEqual(Buffer.from(await importedBytes[0].blob.arrayBuffer()),Buffer.from(h.bytes));
  const incomplete=await zip.createZip([{name:'projects.json',data:JSON.stringify(manifest)}]);await assert.rejects(importer.importCanvasArchive(incomplete),/缺失/);
+});
+
+async function conflictHarness() {
+ const h=await storeHarness();
+ h.store.getState().updateProject(original.id,{nodes:[{...original.nodes[0],metadata:{content:'local draft'}}]});
+ h.database.set(original.id,{...structuredClone(original),__desktopRevision:'external-2',nodes:[{...original.nodes[0],metadata:{content:'external latest'}}]});
+ await h.store.getState().refreshFromDesktop();
+ return h;
+}
+test('conflict stops timers, explicit retry and restart loops without blocking another project',async()=>{
+ const h=await conflictHarness();const initialWrites=h.writes.length;
+ h.store.getState().updateProject(original.id,{nodes:[{...original.nodes[0],metadata:{content:'continued draft'}}]});
+ for(let i=0;i<3;i++)await h.store.getState().refreshFromDesktop();
+ await assert.rejects(h.store.getState().retrySave(original.id),/其他修改/);
+ await tick(450);assert.equal(h.writes.length,initialWrites);
+ const second=h.store.getState().createProject('unrelated');await h.store.getState().retrySave(second);
+ assert.equal(h.store.getState().saveStatus[second].state,'saved');
+ const restart=await storeHarness({storage:h.values,database:h.database});await restart.store.getState().refreshFromDesktop();
+ assert.equal(restart.store.getState().saveStatus[original.id].state,'conflict');assert.equal(restart.writes.length,0);
+ assert.equal(restart.store.getState().openProject(original.id).nodes[0].metadata.content,'continued draft');
+});
+test('adopt latest archives full draft, resets editor, saves next edit and survives restart',async()=>{
+ const h=await conflictHarness();const c=await h.store.getState().inspectSaveConflict(original.id);
+ assert.equal(c.nodes.changed.length,1);assert.equal(c.latestRevision,'external-2');
+ const resolved=await h.store.getState().resolveSaveConflict(original.id,'latest',c.draftToken);
+ assert.equal(JSON.parse(h.values.get(resolved.archiveKey)).project.nodes[0].metadata.content,'local draft');
+ assert.equal(h.store.getState().openProject(original.id).nodes[0].metadata.content,'external latest');
+ assert.match(h.store.getState().restoredRevisions[original.id],/^external-2:/);
+ h.store.getState().updateProject(original.id,{nodes:[{...original.nodes[0],metadata:{content:'after adopt'}}]});await h.store.getState().retrySave(original.id);
+ const restart=await storeHarness({storage:h.values,database:h.database});
+ assert.equal(restart.store.getState().openProject(original.id).nodes[0].metadata.content,'after adopt');
+ assert.equal(restart.store.getState().openProject(original.id).__desktopRevision,h.database.get(original.id).__desktopRevision);
+});
+test('copy preserves media and task provenance without touching or resubmitting original tasks',async()=>{
+ const h=await conflictHarness();h.store.getState().updateProject(original.id,{nodes:[{...original.nodes[0],type:'image',metadata:{content:'local-ref:retained',status:'loading',imageTaskId:'existing-task'}}],pendingAgentRequest:{prompt:'do not run',assets:[]}});
+ const before=JSON.stringify(h.database.get(original.id));
+ const result=await h.store.getState().resolveSaveConflict(original.id,'copy',undefined,'copy-request');
+ const p=h.database.get(result.projectId);assert.equal(p.recoveryCopyOf,original.id);assert.equal(p.nodes[0].metadata.imageTaskId,'existing-task');assert.equal(p.nodes[0].metadata.status,'error');assert.equal(p.nodes[0].metadata.content,'local-ref:retained');assert.equal(p.pendingAgentRequest,undefined);assert.equal(JSON.stringify(h.database.get(original.id)),before);
+ assert.equal(h.store.getState().saveStatus[original.id].state,'conflict');
+ const second=await h.store.getState().resolveSaveConflict(original.id,'copy',undefined,'copy-request');assert.equal(result.projectId,second.projectId);
+});
+test('new edits during backup and a second external change both abort adoption safely',async()=>{
+ const h=await conflictHarness();let edited=false;
+ h.beforeLocalWrite(async key=>{if(key.startsWith('infinite-canvas:save-archive:')&&!edited){edited=true;h.store.getState().updateProject(original.id,{nodes:[{...original.nodes[0],metadata:{content:'typing during resolution'}}]})}});
+ await assert.rejects(h.store.getState().resolveSaveConflict(original.id,'latest'),/新编辑/);
+ assert.equal(h.store.getState().openProject(original.id).nodes[0].metadata.content,'typing during resolution');
+ h.beforeLocalWrite(async()=>{});let reads=0;
+ h.beforeRead(async()=>{if(++reads===2)h.database.set(original.id,{...h.database.get(original.id),__desktopRevision:'external-3',title:'new external title'})});
+ await assert.rejects(h.store.getState().resolveSaveConflict(original.id,'latest'),/又被修改/);
+ const restart=await storeHarness({storage:h.values,database:h.database});assert.equal(restart.store.getState().openProject(original.id).nodes[0].metadata.content,'typing during resolution');assert.equal(restart.store.getState().saveStatus[original.id].state,'conflict');
+});
+test('failed backup or adoption marker never discards the only draft',async()=>{
+ for(const prefix of ['infinite-canvas:save-archive:','infinite-canvas:save-journal:']){
+  const h=await conflictHarness();h.beforeLocalWrite(async(key,value)=>{if(key.startsWith(prefix)&&(prefix.includes('archive')||JSON.parse(value).adopted))throw Error('injected resolution disk failure')});
+  await assert.rejects(h.store.getState().resolveSaveConflict(original.id,'latest'),/disk failure/);
+  const restart=await storeHarness({storage:h.values,database:h.database});assert.equal(restart.store.getState().openProject(original.id).nodes[0].metadata.content,'local draft');
+ }
+});
+test('late save reply cannot undo a resolution and revision-only receipts reach cache',async()=>{
+ const h=await storeHarness();let release;const gate=new Promise(resolve=>{release=resolve});h.beforeSave(()=>gate);
+ h.store.getState().updateProject(original.id,{nodes:[{...original.nodes[0],metadata:{content:'sent'}}]});const saving=h.store.getState().retrySave(original.id);
+ for(let i=0;i<100&&!h.writes.length;i++)await tick(1);
+ const resolution=h.store.getState().resolveSaveConflict(original.id,'latest');release();await saving;await resolution;
+ assert.equal(h.store.getState().saveStatus[original.id].state,'saved');assert.equal(h.store.getState().openProject(original.id).__desktopRevision,'revision-1');
+ assert.equal(JSON.parse(h.values.get('infinite-canvas:canvas_project:'+original.id)).__desktopRevision,'revision-1');
+});
+test('missing saved project is retained for explicit copy and never recreated on refresh',async()=>{
+ const h=await storeHarness({database:new Map()});await h.store.getState().refreshFromDesktop();assert.equal(h.writes.length,0);assert.equal(h.store.getState().saveStatus[original.id].code,'PROJECT_MISSING');assert.equal(h.database.has(original.id),false);
+});
+test('typing after adoption while cache is committing is saved using the adopted revision',async()=>{
+ const h=await conflictHarness();let changed=false;
+ h.beforeLocalWrite(async(key)=>{
+  if(key==='infinite-canvas:canvas_project:'+original.id && h.store.getState().openProject(original.id).nodes[0].metadata.content==='external latest'&&!changed){changed=true;h.store.getState().updateProject(original.id,{nodes:[{...original.nodes[0],metadata:{content:'typed on new version'}}]})}
+ });
+ await h.store.getState().resolveSaveConflict(original.id,'latest');
+ assert.equal(h.database.get(original.id).nodes[0].metadata.content,'typed on new version');assert.equal(h.writes[0].__desktopRevision,'external-2');assert.equal(h.store.getState().saveStatus[original.id].state,'saved');
+});
+test('one project shard failing does not block or mark another project save failed',async()=>{
+ const h=await conflictHarness();
+ h.beforeLocalWrite(async(key)=>{if(key==='infinite-canvas:canvas_project:'+original.id)throw Error('bad shard')});
+ const second=h.store.getState().createProject('healthy');await h.store.getState().retrySave(second);await tick(450);
+ assert.equal(h.database.get(second).title,'healthy');assert.equal(h.store.getState().saveStatus[second].state,'saved');assert.equal(h.database.get(original.id).nodes[0].metadata.content,'external latest');
+});
+test('an interrupted adoption after the durable marker restores latest instead of the old draft',async()=>{
+ const h=await conflictHarness();await h.store.getState().resolveSaveConflict(original.id,'latest');
+ h.values.set('infinite-canvas:recovery:index',JSON.stringify([original.id]));
+ h.values.set('infinite-canvas:recovery:project:'+original.id,JSON.stringify({...original,__desktopRevision:'old'}));
+ const restart=await storeHarness({storage:h.values,database:h.database});await restart.store.getState().refreshFromDesktop();
+ assert.equal(restart.writes.length,0);assert.equal(restart.store.getState().openProject(original.id).nodes[0].metadata.content,'external latest');
 });

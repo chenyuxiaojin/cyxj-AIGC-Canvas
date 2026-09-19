@@ -29,10 +29,8 @@ export const listCanvasCommandHistory = (projectId: string, offset = 0) => invok
 export const listCanvasCommands = () => invoke<CanvasCommand[]>("desktop_canvas_commands", { projectId: null });
 export const claimCanvasCommand = (task: CanvasCommand) => invoke<CanvasCommand>("desktop_claim_canvas_command", { projectId: task.project_id, requestId: task.task_id });
 export const finishCanvasCommand = (task: CanvasCommand, result: Record<string, unknown>) => invoke<CanvasCommand>("desktop_finish_canvas_command", { projectId: task.project_id, requestId: task.task_id, result });
-export const approveCanvasCommand = (task: CanvasCommand, allow: boolean, remember = false) => invoke<CanvasCommand>("desktop_approve_canvas_command", { projectId: task.project_id, requestId: task.task_id, allow, remember });
 export const readCanvasDocument = (projectId: string) => invoke<CanvasDocument>("desktop_canvas_document", { projectId });
 export const submitCanvasCommand = (request: CanvasCommand["request"]) => invoke<CanvasCommand>("desktop_submit_canvas_command", { request });
-export const setCanvasGenerationPermission = (projectId: string, allow: boolean | null = null) => invoke<boolean>("desktop_canvas_generation_permission", { projectId, allow });
 export const getCanvasCommand = (projectId: string, requestId: string, cancel = false) => invoke<CanvasCommand>("desktop_get_canvas_command", { projectId, requestId, cancel });
 export const applyDesktopCanvasOperations = (request: { project_id: string; request_id: string; base_revision: string; actor: "agent"; operations: Record<string, unknown>[] }, dryRun = false) =>
     invoke<CanvasDocument>("desktop_canvas_operations", { request, dryRun });

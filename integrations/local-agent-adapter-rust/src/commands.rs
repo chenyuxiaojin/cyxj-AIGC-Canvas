@@ -10,6 +10,7 @@ use crate::{
 };
 
 pub const ACTIONS: &[&str] = &[
+    "save_inspect", "save_use_latest", "save_copy",
     "director_read",
     "director_capture",
     "director_export_video",
@@ -82,6 +83,9 @@ pub fn submit(
     if !ACTIONS.contains(&request.action.as_str()) || !request.arguments.is_object() {
         return Err(BridgeError::invalid("不支持的画布任务或参数。"));
     }
+    if matches!(request.action.as_str(), "save_use_latest" | "save_copy") && request.arguments["draftToken"].as_str().is_none_or(|value| value.is_empty()) {
+        return Err(BridgeError::invalid("请先用 save_inspect 读取差异，再提供 draftToken。"));
+    }
     // Credentials live in the App's existing configuration, never in the task journal.
     fn has_secret(value: &Value) -> bool {
         match value {
@@ -131,19 +135,9 @@ pub fn submit(
         )
         .with_details(json!({"current_revision":project.revision})));
     }
-    let allowed = tx
-        .query_row(
-            "SELECT allow_generation FROM canvas_command_permissions WHERE project_id=?1",
-            [&request.project_id],
-            |row| row.get::<_, bool>(0),
-        )
-        .optional()?
-        .unwrap_or(false);
-    let state = if is_paid(&request.action) && !allowed {
-        "pending_approval"
-    } else {
-        "queued"
-    };
+    // The authenticated caller already requested generation. The canvas adds no
+    // second approval step; historical pending requests are deliberately untouched.
+    let state = "queued";
     let now = now_rfc3339()?;
     tx.execute("INSERT INTO canvas_commands(request_id,project_id,payload_hash,request_json,status,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?6)",params![request.request_id,request.project_id,hash,raw,state,now])?;
     let result = read(&tx, &request.project_id, &request.request_id)?;

@@ -461,13 +461,13 @@ describe("人与 Agent 共用画布操作协议", () => {
         expect(reloaded.nodes[0].title).toBe("旧工程可编辑");
     });
 
-    test("Agent 付费任务必须以待批准提交，人工批准后才能进入执行", () => {
+    test("Agent 生成直接排队，历史待批准任务仍保留原状态", () => {
         const initial = project([node("gen-node")]);
         const paidTask = { id: "paid-1", nodeId: "gen-node", kind: "paid_video_generation", details: { paid: true, estimatedCostYuan: 0.54 } };
 
         const sneak = applyCanvasOperationBatch(initial, batch("agent", "paid-sneak", 0, [{ type: "task.start", task: { ...paidTask, status: "queued" } }]), { now: () => TIME });
-        expect(sneak.result.ok).toBe(false);
-        expect(sneak.result.error?.code).toBe("paid_task_requires_approval");
+        expect(sneak.result.ok).toBe(true);
+        expect(sneak.project.operationState.tasks["paid-1"].status).toBe("queued");
 
         const started = applyCanvasOperationBatch(initial, batch("agent", "paid-start", 0, [{ type: "task.start", task: { ...paidTask, status: "pending_approval" } }]), { now: () => TIME });
         expect(started.result.ok).toBe(true);

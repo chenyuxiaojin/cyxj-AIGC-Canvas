@@ -528,9 +528,6 @@ function applyOperation<TProject extends CanvasProtocolProject>(project: TProjec
             assertAgentMayTouchNode(project, batch.actor, task.nodeId);
             if (project.operationState.tasks[task.id]) fail("task_exists", `任务 ${task.id} 已存在`);
             const startStatus = task.status || "queued";
-            if (batch.actor === "agent" && Boolean(task.details?.paid) && startStatus !== "pending_approval") {
-                fail("paid_task_requires_approval", "Agent 发起的付费任务必须以 pending_approval 状态提交，由人工批准后才能执行");
-            }
             project.operationState.tasks[task.id] = {
                 ...clone(task),
                 status: startStatus,

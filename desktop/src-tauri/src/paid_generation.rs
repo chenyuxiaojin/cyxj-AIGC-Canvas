@@ -8,7 +8,7 @@ use std::{
 };
 
 use base64::Engine;
-use local_agent_adapter::{SqliteCanvasAdapter, CanvasOperationAdapter, VideoIngestRequest};
+use local_agent_adapter::{CanvasOperationAdapter, VideoIngestRequest};
 use local_executor::TaskStatus;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -126,7 +126,7 @@ fn now_rfc3339() -> String {
 }
 
 fn apply_batch_with_retry(
-    canvas: &SqliteCanvasAdapter,
+    canvas: &dyn CanvasOperationAdapter,
     project_id: &str,
     actor: &str,
     request_label: &str,
@@ -156,7 +156,7 @@ fn apply_batch_with_retry(
 }
 
 fn task_snapshot(
-    canvas: &SqliteCanvasAdapter,
+    canvas: &dyn CanvasOperationAdapter,
     project_id: &str,
     task_id: &str,
 ) -> Result<Value, String> {
@@ -171,7 +171,7 @@ fn task_snapshot(
 }
 
 fn fail_task(
-    canvas: &SqliteCanvasAdapter,
+    canvas: &dyn CanvasOperationAdapter,
     project_id: &str,
     task_id: &str,
     node_id: &str,
@@ -344,7 +344,7 @@ fn h3_download(url: &str, target: &Path) -> Result<(u64, String), String> {
 }
 
 struct DriverContext {
-    canvas: Arc<SqliteCanvasAdapter>,
+    canvas: Arc<dyn CanvasOperationAdapter>,
     runtime: Arc<DesktopRuntime>,
     local_media: Arc<LocalMediaManager>,
     project_id: String,
@@ -359,7 +359,7 @@ fn drive(context: &DriverContext) -> Result<(), String> {
     }
     if task["status"] != "queued" {
         return Err(format!(
-            "任务状态 {} 不可执行（需要先人工批准）",
+            "任务状态 {} 不可执行（仅未执行的排队任务可以启动）",
             task["status"]
         ));
     }
@@ -571,17 +571,17 @@ fn drive(context: &DriverContext) -> Result<(), String> {
     )
 }
 
-fn spawn_driver(context: DriverContext) {
+fn spawn_driver(context: DriverContext) -> Result<(), String> {
     std::thread::Builder::new()
         .name(format!("paid-generation-{}", context.task_id))
         .spawn(move || {
             if let Err(message) = drive(&context) {
                 if let Ok(task) =
-                    task_snapshot(&context.canvas, &context.project_id, &context.task_id)
+                    task_snapshot(context.canvas.as_ref(), &context.project_id, &context.task_id)
                 {
                     if let Some(node_id) = task["nodeId"].as_str() {
                         fail_task(
-                            &context.canvas,
+                            context.canvas.as_ref(),
                             &context.project_id,
                             &context.task_id,
                             node_id,
@@ -591,7 +591,13 @@ fn spawn_driver(context: DriverContext) {
                 }
             }
         })
-        .ok();
+        .map(|_| ())
+        .map_err(|error| format!("无法启动生成任务: {error}"))
+}
+
+pub(crate) fn start_generation(canvas: Arc<dyn CanvasOperationAdapter>, runtime: Arc<DesktopRuntime>, local_media: Arc<LocalMediaManager>, project_id: String, task_id: String) -> Result<(), String> {
+    load_config(local_media.app_data_directory())?;
+    spawn_driver(DriverContext { canvas, runtime, local_media, project_id, task_id })
 }
 
 #[tauri::command]
@@ -603,7 +609,7 @@ pub(crate) fn approve_paid_generation(
     task_id: String,
 ) -> Result<Value, String> {
     let canvas = bridge.canvas();
-    let task = task_snapshot(&canvas, &project_id, &task_id)?;
+    let task = task_snapshot(canvas.as_ref(), &project_id, &task_id)?;
     if task["kind"] != "paid_video_generation" || task["details"]["paid"] != true {
         return Err("该任务不是受控付费生成任务".to_owned());
     }
@@ -613,7 +619,7 @@ pub(crate) fn approve_paid_generation(
     // 先确认配置可用，避免批准落库后立即失败。
     load_config(local_media.app_data_directory())?;
     apply_batch_with_retry(
-        &canvas,
+        canvas.as_ref(),
         &project_id,
         "human",
         &format!("human-approve-{task_id}"),
@@ -625,7 +631,7 @@ pub(crate) fn approve_paid_generation(
         local_media: local_media.inner().clone(),
         project_id,
         task_id: task_id.clone(),
-    });
+    })?;
     Ok(json!({ "approved": true, "task_id": task_id }))
 }
 
@@ -637,7 +643,7 @@ pub(crate) fn reject_paid_generation(
     reason: Option<String>,
 ) -> Result<Value, String> {
     let canvas = bridge.canvas();
-    let task = task_snapshot(&canvas, &project_id, &task_id)?;
+    let task = task_snapshot(canvas.as_ref(), &project_id, &task_id)?;
     if task["status"] != "pending_approval" {
         return Err(format!("任务状态 {} 不在待批准状态", task["status"]));
     }
@@ -649,7 +655,7 @@ pub(crate) fn reject_paid_generation(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "已拒绝".to_owned());
     apply_batch_with_retry(
-        &canvas,
+        canvas.as_ref(),
         &project_id,
         "human",
         &format!("human-reject-{task_id}"),

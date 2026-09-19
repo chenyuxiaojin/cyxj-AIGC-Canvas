@@ -94,10 +94,8 @@ pub(crate) fn save_desktop_canvas_project(
     bridge: State<'_, DesktopAgentBridge>,
     project: Value,
     expected_revision: Option<String>,
-) -> Result<local_agent_adapter::ProjectDocument, String> {
-    let id = project["id"].as_str().ok_or("缺少画布 ID")?.to_owned();
-    bridge.canvas.save_human_project_checked(project, expected_revision.as_deref()).map_err(|error| error.to_string())?;
-    bridge.canvas.get_project(&id).map_err(|error| error.to_string())
+) -> Result<local_agent_adapter::ProjectDocument, local_agent_adapter::ErrorEnvelope> {
+    bridge.canvas.save_human_document_checked(project, expected_revision.as_deref()).map_err(|error| error.envelope())
 }
 
 #[tauri::command]
@@ -142,8 +140,8 @@ pub(crate) fn desktop_canvas_history_restore(bridge: State<'_, DesktopAgentBridg
 }
 
 #[tauri::command]
-pub(crate) fn desktop_canvas_document(bridge: State<'_, DesktopAgentBridge>, project_id: String) -> Result<local_agent_adapter::ProjectDocument, String> {
-    bridge.canvas.get_project(&project_id).map_err(|error| error.to_string())
+pub(crate) fn desktop_canvas_document(bridge: State<'_, DesktopAgentBridge>, project_id: String) -> Result<local_agent_adapter::ProjectDocument, local_agent_adapter::ErrorEnvelope> {
+    bridge.canvas.get_project(&project_id).map_err(|error| error.envelope())
 }
 
 #[tauri::command]

@@ -3,11 +3,11 @@ import { persist, type PersistStorage, type StorageValue } from "zustand/middlew
 
 import { nanoid } from "nanoid";
 import equal from "fast-deep-equal";
-import { localForageStorage } from "@/lib/localforage-storage";
+import { canvasPersistenceStorage as localForageStorage } from "@/lib/localforage-storage";
 import { listCanvasProjects, saveCanvasProject, syncCanvasProjects } from "@/services/api/canvas-tasks";
 import { fetchUserConfig } from "@/services/api/user-config";
 import { useUserStore } from "@/stores/use-user-store";
-import { isDesktopRuntime, loadDesktopCanvasProjects, loadDesktopCanvasDeletedIds, saveDesktopCanvasProject, restoreDesktopCanvasVersion } from "@/services/desktop-runtime";
+import { isDesktopRuntime, loadDesktopCanvasProjects, loadDesktopCanvasDeletedIds, saveDesktopCanvasProject, restoreDesktopCanvasVersion, loadDesktopCanvasProject, canvasPersistenceError, CanvasPersistenceError } from "@/services/desktop-runtime";
 import type { CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { validateCanvasGraph } from "../utils/canvas-graph";
 import type { CanvasAgentConfig, CanvasAssistantSession, CanvasConnection, CanvasNodeData, CanvasPendingAgentRequest, ViewportTransform } from "../types";
@@ -33,6 +33,7 @@ export const DEFAULT_CANVAS_AGENT_PANEL: CanvasSidePanelState = { open: false, w
 
 export type CanvasProject = {
     __desktopRevision?: string;
+    recoveryCopyOf?: string;
     quarantinedConnections?: Array<{ connection: CanvasConnection; reason: string }>;
     id: string;
     title: string;
@@ -53,13 +54,25 @@ export type CanvasProject = {
     operationState: CanvasOperationState;
 };
 
+export type CanvasSaveStatus = { state: "pending" | "saving" | "saved" | "error" | "conflict" | "resolving"; error?: string; code?: string };
+export type CanvasSaveComparison = {
+    draftToken: string; latestRevision: string | null; localTime: string; latestTime: string | null;
+    localNodes: number; latestNodes: number; localConnections: number; latestConnections: number;
+    nodes: { added: string[]; removed: string[]; changed: string[] };
+    connections: { added: string[]; removed: string[]; changed: string[] };
+    otherFields: string[];
+};
+
 type CanvasStore = {
     hydrated: boolean;
     desktopPersistenceStatus: "not_applicable" | "checking" | "database" | "error";
     desktopPersistenceError: string | null;
     projects: CanvasProject[];
     restoredRevisions: Record<string, string>;
-    saveStatus: Record<string, { state: "pending" | "saved" | "error"; error?: string }>;
+    saveStatus: Record<string, CanvasSaveStatus>;
+    inspectSaveConflict: (id: string) => Promise<CanvasSaveComparison>;
+    resolveSaveConflict: (id: string, choice: "latest" | "copy", draftToken?: string, requestId?: string) => Promise<{ projectId: string; archiveKey: string }>;
+
     retrySave: (id: string) => Promise<void>;
     restoreVersion: (id: string, sequence: number, expectedRevision?: string) => Promise<void>;
     createProject: (title?: string, options?: { agentConfig?: CanvasAgentConfig; pendingAgentRequest?: CanvasPendingAgentRequest }) => string;
@@ -92,114 +105,169 @@ const pendingProjects = new Map<string, CanvasProject>();
 const saveChains = new Map<string, Promise<void>>();
 const RECOVERY_INDEX = "infinite-canvas:recovery:index";
 const RECOVERY_PREFIX = "infinite-canvas:recovery:project:";
-let recoveryChain: Promise<void> = Promise.resolve();
+const JOURNAL_PREFIX = "infinite-canvas:save-journal:";
+const ARCHIVE_PREFIX = "infinite-canvas:save-archive:";
+const journalChains = new Map<string, Promise<void>>();
+const epochs = new Map<string, number>();
+const draftVersions = new Map<string, number>();
+const sessionId = nanoid();
+const recoveredAdoptions = new Map<string, CanvasProject>();
+const recoveredStatus = new Map<string, CanvasSaveStatus>();
 let localPersistChain: Promise<void> = Promise.resolve();
 const deletedDesktopIds = new Set<string>();
 const restoringProjects = new Set<string>();
 
-function saveStatus(id: string, state: "pending" | "saved" | "error", error?: string) {
-    useCanvasStore.setState((store) => ({ saveStatus: { ...store.saveStatus, [id]: { state, error } } }));
+function saveStatus(id: string, state: CanvasSaveStatus["state"], error?: string, code?: string) {
+    useCanvasStore.setState((store) => ({ saveStatus: { ...store.saveStatus, [id]: { state, error, code } } }));
 }
-
-function checkpointPending() {
-    recoveryChain = recoveryChain.catch(() => undefined).then(async () => {
-        const pending = [...pendingProjects.values()];
-        for (const project of pending) await localForageStorage.setItem(RECOVERY_PREFIX + project.id, JSON.stringify(project));
-        await localForageStorage.setItem(RECOVERY_INDEX, JSON.stringify(pending.map((project) => project.id)));
+function statusForError(id: string, error: unknown) {
+    const parsed = canvasPersistenceError(error);
+    const previous = useCanvasStore.getState().saveStatus[id]?.state;
+    const conflict = ["REVISION_CONFLICT", "PROJECT_DELETED", "PROJECT_MISSING", "NOT_FOUND", "DRAFT_CHANGED"].includes(parsed.code) || previous === "conflict" || (previous === "resolving" && pendingProjects.has(id));
+    saveStatus(id, conflict ? "conflict" : "error", parsed.message, parsed.code);
+}
+function sameContent(left: CanvasProject, right: CanvasProject) {
+    const { __desktopRevision: _left, ...a } = left;
+    const { __desktopRevision: _right, ...b } = right;
+    return equal(JSON.parse(JSON.stringify(a)), JSON.parse(JSON.stringify(b)));
+}
+function draftToken(id: string) { return `${sessionId}:${draftVersions.get(id) || 0}`; }
+function journalTask(id: string, action: () => Promise<void>) {
+    const next = (journalChains.get(id) || Promise.resolve()).catch(() => undefined).then(action);
+    journalChains.set(id, next);
+    return next;
+}
+function checkpointPending(id: string) {
+    return journalTask(id, async () => {
+        const project = pendingProjects.get(id);
+        if (project) {
+            await localForageStorage.setItem(JOURNAL_PREFIX + id, JSON.stringify({ project, status: useCanvasStore.getState().saveStatus[id] }));
+        } else {
+            // Cache has already been persisted before acknowledging/removing a draft.
+            await localForageStorage.removeItem(JOURNAL_PREFIX + id);
+        }
+        await localForageStorage.removeItem(RECOVERY_PREFIX + id);
     });
-    return recoveryChain;
 }
-
 async function loadRecoveryProjects() {
     const raw = await localForageStorage.getItem(RECOVERY_INDEX);
-    const ids: string[] = raw ? JSON.parse(raw) : [];
-    for (const id of ids) {
+    for (const id of (raw ? JSON.parse(raw) : []) as string[]) {
         const value = await localForageStorage.getItem(RECOVERY_PREFIX + id);
         if (value) pendingProjects.set(id, JSON.parse(value));
     }
+    for (const key of (await localForageStorage.keys()).filter((key) => key.startsWith(JOURNAL_PREFIX))) {
+        const value = await localForageStorage.getItem(key);
+        if (!value) continue;
+        const record = JSON.parse(value);
+        const id = key.slice(JOURNAL_PREFIX.length);
+        if (record.adopted) { pendingProjects.delete(id); recoveredAdoptions.set(id, record.project); continue; }
+        pendingProjects.set(id, record.project);
+        recoveredStatus.set(id, record.status?.state === "conflict" ? record.status : { state: "pending" });
+    }
 }
-
+function conflictError(id: string) {
+    const status = useCanvasStore.getState().saveStatus[id];
+    return new CanvasPersistenceError(status?.code || "REVISION_CONFLICT", status?.error || "画布存在保存冲突，请选择最新版本或另存当前编辑。");
+}
 function flushProject(id: string): Promise<void> {
+    const epoch = epochs.get(id) || 0;
     const task = (saveChains.get(id) || Promise.resolve()).catch(() => undefined).then(async () => {
-      if (restoringProjects.has(id)) return;
-      while (pendingProjects.has(id)) {
-        const project = pendingProjects.get(id);
-        if (!project) return;
-        try {
-            await checkpointPending();
-            validateCanvasGraph(project);
-            if (deletedDesktopIds.has(id)) throw new Error("画布已在桌面删除；未保存内容仍留在恢复记录中");
-            let saved: CanvasProject;
-            if (isDesktopRuntime()) saved = await saveDesktopCanvasProject(project);
-            else {
-                const token = useUserStore.getState().token;
-                if (!token || !accountCanvasSyncEnabled) return;
-                saved = await saveCanvasProject(token, project);
+        if (restoringProjects.has(id) || epoch !== (epochs.get(id) || 0)) return;
+        if (useCanvasStore.getState().saveStatus[id]?.state === "conflict") throw conflictError(id);
+        while (pendingProjects.has(id)) {
+            const project = pendingProjects.get(id)!;
+            try {
+                await checkpointPending(id);
+                validateCanvasGraph(project);
+                if (deletedDesktopIds.has(id)) throw new CanvasPersistenceError("PROJECT_DELETED", "画布已删除，未保存内容可另存为副本。");
+                saveStatus(id, "saving");
+                let saved: CanvasProject;
+                if (isDesktopRuntime()) saved = await saveDesktopCanvasProject(project);
+                else {
+                    const token = useUserStore.getState().token;
+                    if (!token || !accountCanvasSyncEnabled) return;
+                    saved = await saveCanvasProject(token, project);
+                }
+                if (epoch !== (epochs.get(id) || 0)) return; // Resolution owns this project now.
+                if (!sameContent(saved, project)) throw new CanvasPersistenceError("REVISION_CONFLICT", "保存回执与提交内容不同，当前编辑已保留，请比较版本。");
+                const revision = saved.__desktopRevision;
+                const pending = pendingProjects.get(id);
+                const next = pending === project ? saved : { ...pending!, __desktopRevision: revision };
+                // Keep a recoverable acknowledged draft until cache and journal succeed.
+                pendingProjects.set(id, next);
+                useCanvasStore.setState((state) => ({ projects: state.projects.map((current) => current.id === id ? { ...current, __desktopRevision: revision } : current) }));
+                await persistLocalProject(id);
+                if (epoch !== (epochs.get(id) || 0)) return;
+                if (pendingProjects.get(id) === next && pending === project) pendingProjects.delete(id);
+                await checkpointPending(id);
+                if (!pendingProjects.has(id)) saveStatus(id, "saved");
+            } catch (error) {
+                if (epoch !== (epochs.get(id) || 0)) return;
+                statusForError(id, error);
+                await checkpointPending(id).catch(() => undefined);
+                throw error;
             }
-            const { __desktopRevision: savedRevision, ...savedContent } = saved;
-            const { __desktopRevision: _expectedRevision, ...sentContent } = project;
-            if (!equal(JSON.parse(JSON.stringify(savedContent)), JSON.parse(JSON.stringify(sentContent)))) {
-                throw new Error("桌面已有较新的修改，当前编辑已保留；请先核对两个版本");
-            }
-            if (pendingProjects.get(id) === project) {
-                pendingProjects.delete(id);
-            } else if (pendingProjects.has(id)) {
-                const latest = { ...pendingProjects.get(id)!, __desktopRevision: savedRevision };
-                pendingProjects.set(id, latest);
-            }
-            useCanvasStore.setState((state) => ({ projects: state.projects.map((current) => current.id === id ? { ...current, __desktopRevision: savedRevision } : current) }));
-            await checkpointPending();
-            if (!pendingProjects.has(id)) saveStatus(id, "saved");
-        } catch (error) {
-            saveStatus(id, "error", error instanceof Error ? error.message : String(error));
-            throw error;
         }
-      }
     });
     saveChains.set(id, task);
     return task;
 }
-
 function queueProjectSave(project: CanvasProject) {
-    saveStatus(project.id, "pending");
+    draftVersions.set(project.id, (draftVersions.get(project.id) || 0) + 1);
+    const blocked = ["conflict", "resolving"].includes(useCanvasStore.getState().saveStatus[project.id]?.state);
+    if (!blocked) saveStatus(project.id, "pending");
     if (!isDesktopRuntime() && (!useUserStore.getState().token || !accountCanvasSyncEnabled)) return;
     pendingProjects.set(project.id, project);
-    void checkpointPending().catch((error) => saveStatus(project.id, "error", String(error)));
-    const previous = projectSaveTimers.get(project.id);
-    if (previous) clearTimeout(previous);
+    void checkpointPending(project.id).catch((error) => { if (!blocked) statusForError(project.id, error); });
+    cancelProjectSaves([project.id]);
+    if (blocked || restoringProjects.has(project.id)) return;
     projectSaveTimers.set(project.id, setTimeout(() => {
         projectSaveTimers.delete(project.id);
         void flushProject(project.id).catch(() => undefined);
     }, 400));
 }
-
-async function readDesktopProjects(localProjects: CanvasProject[]) {
-    const [desktopProjects, deletedIds] = await Promise.all([loadDesktopCanvasProjects<CanvasProject>(), loadDesktopCanvasDeletedIds()]);
+async function readDesktopProjects(_localProjects: CanvasProject[]) {
+    const [loaded, deletedIds] = await Promise.all([loadDesktopCanvasProjects<CanvasProject>(), loadDesktopCanvasDeletedIds()]);
+    const desktopProjects = loaded.projects;
     deletedDesktopIds.clear();
     deletedIds.forEach((id) => deletedDesktopIds.add(id));
-    for (const project of localProjects.filter((item) => deletedDesktopIds.has(item.id))) {
-        await localForageStorage.setItem("infinite-canvas:recovery:deleted:" + project.id, JSON.stringify(project));
-    }
-    // A completed write may have lost its reply. Only exact content equality can
-    // acknowledge recovery; a changed timestamp or any other edit remains a conflict.
-    let acknowledgedRecovery = false;
-    for (const desktopProject of desktopProjects) {
-        const pending = pendingProjects.get(desktopProject.id);
-        if (!pending || deletedDesktopIds.has(desktopProject.id)) continue;
-        const { __desktopRevision: _pendingRevision, ...pendingContent } = pending;
-        const { __desktopRevision: _savedRevision, ...savedContent } = desktopProject;
-        if (equal(JSON.parse(JSON.stringify(pendingContent)), JSON.parse(JSON.stringify(savedContent)))) {
-            pendingProjects.delete(desktopProject.id);
-            acknowledgedRecovery = true;
+    const localProjects = useCanvasStore.getState().hydrated ? useCanvasStore.getState().projects : _localProjects;
+    const desktopIds = new Set(desktopProjects.map((project) => project.id));
+    const failedIds = new Set(loaded.failures.map((failure) => failure.id));
+    for (const failure of loaded.failures) statusForError(failure.id, failure.error);
+    for (const project of localProjects) {
+        const id = project.id;
+        if (restoringProjects.has(id)) continue;
+        if (deletedDesktopIds.has(id)) {
+            await localForageStorage.setItem("infinite-canvas:recovery:deleted:" + id, JSON.stringify(pendingProjects.get(id) || project));
+            cancelProjectSaves([id]);
+            if (pendingProjects.has(id)) statusForError(id, new CanvasPersistenceError("PROJECT_DELETED", "画布已删除，编辑已保留，可另存副本。"));
+        } else if (!desktopIds.has(id) && !failedIds.has(id) && !pendingProjects.has(id)) {
+            pendingProjects.set(id, project);
+            statusForError(id, new CanvasPersistenceError("PROJECT_MISSING", "已保存的画布现已不存在，当前缓存可另存副本。"));
+            await checkpointPending(id);
         }
     }
-    if (acknowledgedRecovery) await checkpointPending();
-    const desktopIds = new Set(desktopProjects.map((project) => project.id));
-    for (const project of localProjects.filter((item) => !desktopIds.has(item.id) && !deletedDesktopIds.has(item.id))) {
-        if (!pendingProjects.has(project.id)) pendingProjects.set(project.id, project);
+    for (const desktopProject of desktopProjects) {
+        const id = desktopProject.id;
+        if (restoringProjects.has(id) || saveChains.has(id) && useCanvasStore.getState().saveStatus[id]?.state === "saving") continue;
+        const pending = pendingProjects.get(id);
+        if (!pending) continue;
+        if (sameContent(pending, desktopProject)) {
+            // An exact committed write with a lost reply is safe to acknowledge.
+            await localForageStorage.setItem(CANVAS_PROJECT_PREFIX + id, JSON.stringify(desktopProject));
+            if (pendingProjects.get(id) !== pending) continue;
+            pendingProjects.delete(id);
+            await checkpointPending(id);
+            saveStatus(id, "saved");
+        } else if (pending.__desktopRevision !== desktopProject.__desktopRevision) {
+            cancelProjectSaves([id]);
+            statusForError(id, new CanvasPersistenceError("REVISION_CONFLICT", "画布已有其他修改，当前编辑已保留。"));
+            await checkpointPending(id);
+        }
     }
     useCanvasStore.setState({ desktopPersistenceStatus: "database", desktopPersistenceError: null });
-    return mergeDesktopCanvasProjects(desktopProjects, localProjects.filter((project) => !deletedDesktopIds.has(project.id)));
+    return mergeDesktopCanvasProjects(desktopProjects, localProjects.filter((project) => !deletedDesktopIds.has(project.id) || pendingProjects.has(project.id)));
 }
 
 function cancelProjectSaves(ids: string[]) {
@@ -246,7 +314,9 @@ function projectNeedsWrite(project: CanvasProject) {
     if (!previous) return true;
     return (
         previous !== project &&
-        (previous.updatedAt !== project.updatedAt ||
+        (previous.__desktopRevision !== project.__desktopRevision ||
+            previous.operationState !== project.operationState ||
+            previous.updatedAt !== project.updatedAt ||
             previous.title !== project.title ||
             previous.nodes !== project.nodes ||
             previous.connections !== project.connections ||
@@ -291,20 +361,26 @@ function persistLocalProjects(projects: CanvasProject[]) {
 }
 
 async function writeLocalProjects(projects: CanvasProject[]) {
-    projects.forEach(validateCanvasGraph);
     const dirty = canvasShardsReady ? projects.filter(projectNeedsWrite) : projects;
     const nextIds = new Set(projects.map((project) => project.id));
     const removedIds = Array.from(lastWrittenProjects.keys()).filter((id) => !nextIds.has(id));
-    await Promise.all([
-        ...dirty.map((project) =>
-            localForageStorage.setItem(CANVAS_PROJECT_PREFIX + project.id, JSON.stringify(project)),
-        ),
-        ...removedIds.map((id) => localForageStorage.removeItem(CANVAS_PROJECT_PREFIX + id)),
-        localForageStorage.setItem(
-            CANVAS_STORE_INDEX_KEY,
-            JSON.stringify({ version: 1, ids: projects.map((project) => project.id) } satisfies CanvasStoreIndex),
-        ),
-    ]);
+    const results = await Promise.allSettled(dirty.map(async (project) => {
+        validateCanvasGraph(project);
+        await localForageStorage.setItem(CANVAS_PROJECT_PREFIX + project.id, JSON.stringify(project));
+        lastWrittenProjects.set(project.id, project);
+    }));
+    results.forEach((result, index) => {
+        if (result.status === "rejected") statusForError(dirty[index].id, result.reason);
+    });
+    try {
+        await localForageStorage.setItem(CANVAS_STORE_INDEX_KEY, JSON.stringify({ version: 1, ids: projects.map((project) => project.id) } satisfies CanvasStoreIndex));
+    } catch (error) {
+        for (const project of dirty) if (useCanvasStore.getState().saveStatus[project.id]?.state !== "conflict") statusForError(project.id, error);
+        throw error;
+    }
+    await Promise.all(removedIds.map((id) => localForageStorage.removeItem(CANVAS_PROJECT_PREFIX + id)));
+    const failedIds = results.flatMap((result, index) => result.status === "rejected" ? [dirty[index].id] : []);
+    if (failedIds.length) throw new CanvasPersistenceError("LOCAL_CACHE_FAILED", "本机缓存写入失败，编辑仍保留。", { projectIds: failedIds });
     rememberWrittenProjects(projects);
     canvasShardsReady = true;
 }
@@ -312,7 +388,8 @@ async function writeLocalProjects(projects: CanvasProject[]) {
 const canvasStorage: PersistStorage<CanvasStore> = {
     getItem: async (name) => {
         await loadRecoveryProjects();
-        const localProjects = mergeCanvasProjects(await loadLocalProjects(), [...pendingProjects.values()]);
+        const cached = await loadLocalProjects();
+        const localProjects = [...new Map([...cached, ...recoveredAdoptions.values(), ...pendingProjects.values()].map((project) => [project.id, project])).values()];
         const token = useUserStore.getState().token;
         const localParsed = {
             state: { projects: localProjects },
@@ -330,10 +407,8 @@ const canvasStorage: PersistStorage<CanvasStore> = {
                         version: 0,
                     } as StorageValue<CanvasStore>;
                     queuedPersistState = nextState;
-                    await localForageStorage.setItem(
-                        name,
-                        JSON.stringify(parsed),
-                    );
+                    await persistLocalProjects(projects).catch(() => undefined);
+                    for (const project of projects) if (!pendingProjects.has(project.id) && !useCanvasStore.getState().saveStatus[project.id]) saveStatus(project.id, "saved");
                     return parsed;
                 }
             } catch (error) {
@@ -383,16 +458,144 @@ const canvasStorage: PersistStorage<CanvasStore> = {
         saveTimer = setTimeout(() => {
             saveTimer = null;
             void persistLocalProjects(nextState.projects || []).then(() => {
-                if (!isDesktopRuntime()) for (const project of nextState.projects || []) {
-                    if (!pendingProjects.has(project.id) && useCanvasStore.getState().projects.find((p) => p.id === project.id) === project) saveStatus(project.id, "saved");
+                for (const project of nextState.projects || []) {
+                    if (!pendingProjects.has(project.id) && useCanvasStore.getState().saveStatus[project.id]?.state !== "resolving" && useCanvasStore.getState().projects.find((p) => p.id === project.id) === project) saveStatus(project.id, "saved");
                 }
             }).catch((error) => {
-                for (const project of nextState.projects || []) saveStatus(project.id, "error", `本机保存失败：${String(error)}`);
+                const ids = (canvasPersistenceError(error).details as { projectIds?: string[] } | undefined)?.projectIds;
+                for (const project of nextState.projects || []) if (!ids || ids.includes(project.id)) {
+                    if (useCanvasStore.getState().saveStatus[project.id]?.state !== "conflict") statusForError(project.id, error);
+                }
             });
         }, 400);
     },
     removeItem: (name) => localForageStorage.removeItem(name),
 };
+
+function compareItems<T extends { id: string; title?: string }>(local: T[], latest: T[]) {
+    const a = new Map(local.map((item) => [item.id, item]));
+    const b = new Map(latest.map((item) => [item.id, item]));
+    const label = (item: T) => item.title ? `${item.title} (${item.id})` : item.id;
+    return {
+        added: local.filter((item) => !b.has(item.id)).map(label),
+        removed: latest.filter((item) => !a.has(item.id)).map(label),
+        changed: local.filter((item) => b.has(item.id) && !equal(item, b.get(item.id))).map(label),
+    };
+}
+async function inspectSaveConflict(id: string): Promise<CanvasSaveComparison> {
+    const latest = isDesktopRuntime() ? await loadDesktopCanvasProject<CanvasProject>(id).catch((error) => {
+        if (["NOT_FOUND", "PROJECT_DELETED"].includes(canvasPersistenceError(error).code)) return null;
+        throw error;
+    }) : null;
+    const local = useCanvasStore.getState().openProject(id);
+    if (!local) throw new Error("画布不存在");
+    const excluded = new Set(["nodes", "connections", "__desktopRevision", "operationState", "updatedAt"]);
+    return {
+        draftToken: draftToken(id), latestRevision: latest?.__desktopRevision || null,
+        localTime: local.updatedAt, latestTime: latest?.updatedAt || null,
+        localNodes: local.nodes.length, latestNodes: latest?.nodes.length || 0,
+        localConnections: local.connections.length, latestConnections: latest?.connections.length || 0,
+        nodes: compareItems(local.nodes, latest?.nodes || []), connections: compareItems(local.connections, latest?.connections || []),
+        otherFields: [...new Set([...Object.keys(local), ...Object.keys(latest || {})])].filter((key) => !excluded.has(key) && !equal(local[key as keyof CanvasProject], latest?.[key as keyof CanvasProject])),
+    };
+}
+async function resolveSaveConflict(id: string, choice: "latest" | "copy", expectedToken?: string, requestId = nanoid()): Promise<{ projectId: string; archiveKey: string }> {
+    if (restoringProjects.has(id)) throw new CanvasPersistenceError("RESOLUTION_BUSY", "正在处理这个画布，请稍后再试。");
+    if (expectedToken && expectedToken !== draftToken(id)) throw new CanvasPersistenceError("DRAFT_CHANGED", "当前编辑已变化，请重新比较后选择。");
+    const version = draftToken(id);
+    restoringProjects.add(id);
+    epochs.set(id, (epochs.get(id) || 0) + 1);
+    cancelProjectSaves([id]);
+    const previousStatus = useCanvasStore.getState().saveStatus[id];
+    saveStatus(id, "resolving");
+    const archiveKey = ARCHIVE_PREFIX + id + ":" + requestId;
+    try {
+        await saveChains.get(id)?.catch(() => undefined);
+        await journalChains.get(id)?.catch(() => undefined);
+        const draft = useCanvasStore.getState().openProject(id);
+        if (!draft) throw new Error("画布不存在");
+        const unchanged = () => {
+            if (version !== draftToken(id) || useCanvasStore.getState().openProject(id) !== draft) throw new CanvasPersistenceError("DRAFT_CHANGED", "处理期间又有新编辑，已保留；请重新比较后选择。");
+        };
+        unchanged();
+        const archived = await localForageStorage.getItem(archiveKey);
+        const record = archived ? JSON.parse(archived) as { project: CanvasProject; copyId: string } : { project: draft, copyId: nanoid() };
+        if (!sameContent(record.project, draft)) throw new CanvasPersistenceError("DRAFT_CHANGED", "这个处理请求的编辑已变化，请使用新的请求编号。");
+        // An immutable, discoverable full preimage comes before cache/queue changes.
+        await localForageStorage.setItem(archiveKey, JSON.stringify(record));
+        if (await localForageStorage.getItem(archiveKey) !== JSON.stringify(record)) throw new Error("恢复备份读回失败，当前编辑未切换。");
+        unchanged();
+        if (choice === "copy") {
+            const copy = rebindCanvasProjectIdentity(migrateCanvasProject({
+                ...draft, id: record.copyId, __desktopRevision: undefined, recoveryCopyOf: id,
+                title: `${draft.title} · 恢复副本`, autoTitlePending: false, pendingAgentRequest: undefined,
+                // Keep task IDs and provenance, but a copy is not a new instruction.
+                nodes: draft.nodes.map((node) => node.metadata?.status === "loading" ? { ...node, metadata: { ...node.metadata, status: "error" as const, errorDetails: "恢复副本保留原任务编号；请在原画布查询结果。" } } : node),
+            }), record.copyId);
+            let saved: CanvasProject = copy;
+            if (isDesktopRuntime()) {
+                try { saved = await saveDesktopCanvasProject(copy); }
+                catch (error) {
+                    if (canvasPersistenceError(error).code !== "REVISION_CONFLICT") throw error;
+                    const existing = await loadDesktopCanvasProject<CanvasProject>(copy.id);
+                    if (!sameContent(existing, copy)) throw error;
+                    saved = existing;
+                }
+            }
+            useCanvasStore.setState((state) => ({ projects: [saved, ...state.projects.filter((project) => project.id !== saved.id)] }));
+            await persistLocalProject(saved.id);
+            saveStatus(saved.id, "saved");
+            // The source stays unresolved and keeps all original task identities.
+            saveStatus(id, previousStatus?.state === "error" ? "error" : "conflict", previousStatus?.error, previousStatus?.code);
+            await checkpointPending(id);
+            return { projectId: saved.id, archiveKey };
+        }
+        if (!isDesktopRuntime()) throw new Error("使用最新版本需要桌面版");
+        let latest = await loadDesktopCanvasProject<CanvasProject>(id);
+        unchanged();
+        latest = { ...migrateCanvasProject(latest), viewport: draft.viewport, sidePanel: draft.sidePanel, agentPanel: draft.agentPanel };
+        // Serialize with draft checkpoints. The adopted marker is the commit point
+        // across SQLite and IndexedDB; restarting never treats the archive as a task.
+        await journalTask(id, async () => {
+            unchanged();
+            await localPersistChain.catch(() => undefined);
+            await localForageStorage.setItem(CANVAS_PROJECT_PREFIX + id, JSON.stringify(latest));
+            const check = await loadDesktopCanvasProject<CanvasProject>(id);
+            if (check.__desktopRevision !== latest.__desktopRevision) throw new CanvasPersistenceError("REVISION_CONFLICT", "处理期间画布又被修改，请重新比较最新版本。");
+            unchanged();
+            await localForageStorage.setItem(JOURNAL_PREFIX + id, JSON.stringify({ adopted: true, project: latest, archiveKey }));
+        });
+        unchanged();
+        pendingProjects.delete(id);
+        useCanvasStore.setState((state) => ({
+            projects: state.projects.map((project) => project.id === id ? latest : project),
+            restoredRevisions: { ...state.restoredRevisions, [id]: `${latest.__desktopRevision}:${requestId}` },
+        }));
+        await persistLocalProject(id);
+        saveStatus(id, pendingProjects.has(id) ? "pending" : "saved");
+        return { projectId: id, archiveKey };
+    } catch (error) {
+        statusForError(id, error);
+        // On failure a newer edit wins over the candidate/backup snapshot.
+        if (pendingProjects.has(id)) await checkpointPending(id).catch(() => undefined);
+        throw error;
+    } finally {
+        restoringProjects.delete(id);
+        if (pendingProjects.has(id) && useCanvasStore.getState().saveStatus[id]?.state === "pending") await flushProject(id);
+    }
+}
+
+function persistLocalProject(id: string): Promise<void> {
+    localPersistChain = localPersistChain.catch(() => undefined).then(async () => {
+        const project = useCanvasStore.getState().openProject(id);
+        if (!project) return;
+        validateCanvasGraph(project);
+        await localForageStorage.setItem(CANVAS_PROJECT_PREFIX + id, JSON.stringify(project));
+        await localForageStorage.setItem(CANVAS_STORE_INDEX_KEY, JSON.stringify({ version: 1, ids: useCanvasStore.getState().projects.map((item) => item.id) }));
+        lastWrittenProjects.set(id, project);
+    });
+    return localPersistChain;
+}
 
 export const useCanvasStore = create<CanvasStore>()(
     persist(
@@ -403,14 +606,19 @@ export const useCanvasStore = create<CanvasStore>()(
             projects: [],
             saveStatus: {},
             restoredRevisions: {},
+            inspectSaveConflict: inspectSaveConflict,
+            resolveSaveConflict: resolveSaveConflict,
             retrySave: async (id) => {
+                if (get().saveStatus[id]?.state === "conflict") throw conflictError(id);
+                if (restoringProjects.has(id)) throw new CanvasPersistenceError("RESOLUTION_BUSY", "正在处理保存，请稍后再试。");
+                cancelProjectSaves([id]);
                 saveStatus(id, "pending");
                 try {
-                    await persistLocalProjects(get().projects);
+                    await persistLocalProject(id);
                     await flushProject(id);
                     if (!pendingProjects.has(id)) saveStatus(id, "saved");
                 } catch (error) {
-                    saveStatus(id, "error", String(error));
+                    statusForError(id, error);
                     throw error;
                 }
             },
@@ -426,14 +634,14 @@ export const useCanvasStore = create<CanvasStore>()(
                 try {
                     const restored = await restoreDesktopCanvasVersion<CanvasProject>(id, sequence, before.__desktopRevision, crypto.randomUUID());
                     if (pendingProjects.has(id) || get().projects.find((project) => project.id === id) !== before) {
-                        await checkpointPending();
+                        await checkpointPending(id);
                         throw new Error("历史版本已恢复，但恢复期间又有新编辑；新编辑已保留，请另存当前编辑后重新打开画布核对");
                     }
                     set((state) => ({ projects: state.projects.map((project) => project.id === id ? restored : project), restoredRevisions: { ...state.restoredRevisions, [id]: restored.__desktopRevision! } }));
                     await persistLocalProjects(get().projects);
                     if (!pendingProjects.has(id)) saveStatus(id, "saved");
                 } catch (error) {
-                    saveStatus(id, "error", String(error));
+                    statusForError(id, error);
                     throw error;
                 } finally {
                     restoringProjects.delete(id);
@@ -574,7 +782,8 @@ export const useCanvasStore = create<CanvasStore>()(
                 set((state) => ({
                     projects: state.projects.map((item) => (item.id === id ? nextProject : item)),
                 }));
-                if (!uiOnly) queueProjectSave(nextProject);
+                if (!uiOnly || pendingProjects.has(id)) queueProjectSave(nextProject);
+                else saveStatus(id, "pending");
             },
             applyOperationBatch: (batch) => {
                 const sourceProject = get().projects.find((project) => project.id === batch.projectId);
@@ -617,10 +826,10 @@ export const useCanvasStore = create<CanvasStore>()(
                 const projects = await readDesktopProjects(get().projects);
                 queuedPersistState = { projects };
                 set({ projects });
-                await persistLocalProjects(projects);
-                const failures = await Promise.allSettled([...pendingProjects.keys()].filter((id) => !deletedDesktopIds.has(id)).map(flushProject));
-                const failed = failures.find((result) => result.status === "rejected");
-                if (failed?.status === "rejected") throw failed.reason;
+                await persistLocalProjects(projects).catch(() => undefined);
+                for (const project of projects) if (!pendingProjects.has(project.id) && !restoringProjects.has(project.id) && !["error", "conflict"].includes(get().saveStatus[project.id]?.state)) saveStatus(project.id, "saved");
+                // Per-project failures remain visible without poisoning every canvas refresh.
+                await Promise.allSettled([...pendingProjects.keys()].filter((id) => !deletedDesktopIds.has(id) && !["error", "conflict", "resolving"].includes(get().saveStatus[id]?.state)).map(flushProject));
             },
         }),
         {
@@ -631,7 +840,7 @@ export const useCanvasStore = create<CanvasStore>()(
                     projects: state.projects,
                 }) as StorageValue<CanvasStore>["state"],
             onRehydrateStorage: () => () => {
-                useCanvasStore.setState({ hydrated: true });
+                useCanvasStore.setState((state) => ({ hydrated: true, saveStatus: { ...Object.fromEntries(recoveredStatus), ...state.saveStatus } }));
             },
         },
     ),
@@ -664,7 +873,9 @@ export function acceptDesktopCanvasDocument(project: CanvasProject, revision: st
     if (pendingProjects.has(project.id) || restoringProjects.has(project.id)) throw new Error("当前编辑尚未保存，已保留本机内容。");
     const next = { ...project, __desktopRevision: revision };
     useCanvasStore.setState((state) => ({ projects: state.projects.map((current) => current.id === next.id ? next : current) }));
-    saveStatus(project.id, "saved");
+    return persistLocalProject(project.id).then(() => {
+        if (!pendingProjects.has(project.id)) saveStatus(project.id, "saved");
+    }).catch((error) => { statusForError(project.id, error); throw error; });
 }
 
 function mergeDesktopCanvasProjects(
@@ -677,6 +888,7 @@ function mergeDesktopCanvasProjects(
     desktopProjects.forEach((desktopProject) => {
         const localProject = localById.get(desktopProject.id);
         if (deletedDesktopIds.has(desktopProject.id)) return;
+        if (restoringProjects.has(desktopProject.id)) return;
         projects.set(desktopProject.id, {
             ...migrateCanvasProject(pendingProjects.get(desktopProject.id) || desktopProject),
             viewport: localProject?.viewport || desktopProject.viewport,

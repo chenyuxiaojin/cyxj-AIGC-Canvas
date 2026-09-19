@@ -533,7 +533,7 @@ async fn submit_video_generation(
                         "width": request.size.width,
                         "height": request.size.height,
                         "metadata": {
-                            "status": "pending_approval",
+                            "status": "loading",
                             "generationMode": "video",
                             "prompt": request.prompt,
                             "localTaskKind": "paid_video_generation",
@@ -558,7 +558,7 @@ async fn submit_video_generation(
                         "id": canvas_task_id,
                         "nodeId": request.node_id,
                         "kind": "paid_video_generation",
-                        "status": "pending_approval",
+                        "status": "queued",
                         "requestId": request.request_id,
                         "details": {
                             "paid": true,
@@ -576,11 +576,23 @@ async fn submit_video_generation(
         }),
         false,
     )?;
+    if !applied.duplicate {
+        if let Err(error) = state.runtime.clone().start_video_generation(state.canvas.clone(), request.project_id.clone(), canvas_task_id.clone()) {
+            let current = state.canvas.get_project(&request.project_id)?;
+            state.canvas.apply_protocol_batch(&request.project_id, json!({
+                "protocolVersion":1,"actor":"system","requestId":format!("start-failed-{}",request.request_id),
+                "projectId":request.project_id,"baseRevision":current.project["operationState"]["revision"],"timestamp":now_rfc3339()?,
+                "operations":[{"type":"task.update","taskId":canvas_task_id,"status":"failed","details":{"error":error.message}},
+                    {"type":"node.update","nodeId":request.node_id,"patch":{"metadata":{"status":"error","errorDetails":error.message}}}]
+            }),false)?;
+            return Err(error);
+        }
+    }
     Ok(Json(Success::new(json!({
         "mode": "paid_video_generation",
         "paid": true,
-        "approval_required": true,
-        "status": "pending_approval",
+        "approval_required": false,
+        "status": "queued",
         "duplicate": applied.duplicate,
         "node_id": request.node_id,
         "canvas_task_id": canvas_task_id,

@@ -65,6 +65,9 @@ pub struct VideoGenerationRequest {
 }
 
 pub trait AgentRuntime: Send + Sync {
+    fn start_video_generation(self: std::sync::Arc<Self>, _canvas: std::sync::Arc<dyn crate::CanvasOperationAdapter>, _project_id: String, _task_id: String) -> Result<(), BridgeError> {
+        Err(BridgeError::unavailable("Video generation executor unavailable"))
+    }
     fn report(&self) -> Result<Value, BridgeError>;
     fn media_inbox(&self) -> Result<Value, BridgeError> { Err(BridgeError::unavailable("Media capability unavailable")) }
     fn validate_video_ingest(&self, request: &VideoIngestRequest) -> Result<(), BridgeError> { Err(BridgeError::unavailable("Media capability unavailable")) }

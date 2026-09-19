@@ -145,11 +145,11 @@ test("desktop canvas still loads and saves through local IPC without waiting for
         "fast-deep-equal": { default: (a,b) => assert.deepEqual(JSON.parse(JSON.stringify(a)),JSON.parse(JSON.stringify(b))) === undefined },
         "../utils/canvas-graph": load("app/(user)/canvas/utils/canvas-graph.ts"),
         "zustand/middleware": { persist: (initializer, options) => { persistence = options; return initializer; } },
-        "@/lib/localforage-storage": { localForageStorage: { getItem: async (key) => local.get(key), setItem: async (key, value) => local.set(key, value) } },
+        "@/lib/localforage-storage": { canvasPersistenceStorage: { keys: async () => [], removeItem: async (key) => local.delete(key), getItem: async (key) => local.get(key), setItem: async (key, value) => local.set(key, value) } },
         "@/services/api/canvas-tasks": { listCanvasProjects: noRequest, saveCanvasProject: noRequest, syncCanvasProjects: noRequest },
         "@/services/api/user-config": { fetchUserConfig: noRequest },
         "@/stores/use-user-store": { useUserStore: { getState: () => ({ token: "" }) } },
-        "@/services/desktop-runtime": { isDesktopRuntime: () => true, loadDesktopCanvasDeletedIds: async () => [], loadDesktopCanvasProjects: async () => [original], saveDesktopCanvasProject: async (project) => { writes.push(project); return project; } },
+        "@/services/desktop-runtime": { isDesktopRuntime: () => true, loadDesktopCanvasDeletedIds: async () => [], loadDesktopCanvasProjects: async () => ({projects:[original],failures:[]}), saveDesktopCanvasProject: async (project) => { writes.push(project); return project; } },
     });
     const loaded = await persistence.storage.getItem("infinite-canvas:canvas_store");
     assert.equal(loaded.state.projects[0].nodes[0].id, "original-node");

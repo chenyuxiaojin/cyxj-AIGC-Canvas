@@ -93,7 +93,7 @@ pub fn catalog() -> Value {
                 "id":"canvas.commands.submit", "method":"POST", "path":"/v1/canvas/commands",
                 "risk":"action_dependent", "paid":"generation_only", "source":"AppCanvasExecutor",
                 "actions":crate::commands::ACTIONS,
-                "generation_authorization":"project_permission_or_pending_approval",
+                "generation_authorization":"authenticated_request_no_canvas_confirmation",
                 "execution":"App must be running; open_project selects the bound canvas without manual clicks. A queue receipt is not media success.",
                 "idempotency":"request_id_and_exact_payload; claimed commands are never automatically replayed"
             },
@@ -152,15 +152,15 @@ pub fn catalog() -> Value {
                 "id": "generation.video_request",
                 "method": "POST",
                 "path": "/v1/generation/video-requests",
-                "risk": "paid_write_pending_human_approval",
+                "risk": "paid_write",
                 "dry_run": false,
                 "paid": true,
-                "approval_required": true,
+                "approval_required": false,
                 "source": "DesktopRuntime+CanonicalCanvasAdapter",
                 "resolutions": ["768P", "2K"],
                 "duration_seconds_range": [4, 15],
                 "keyframe_scope": "existing_image_node_with_local_media",
-                "note": "只创建 pending_approval 任务与占位节点；人工在画布上批准前不调用任何付费 API"
+                "note": "创建 queued 任务与占位节点并启动受控生成；相同 request_id 不重复提交，无画布二次确认"
             },
             {
                 "id": "tasks.test_clip",

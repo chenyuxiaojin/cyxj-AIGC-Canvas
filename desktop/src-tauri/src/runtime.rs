@@ -340,6 +340,10 @@ pub(crate) async fn probe_desktop_runtime(
 }
 
 impl AgentRuntime for DesktopRuntime {
+    fn start_video_generation(self: std::sync::Arc<Self>, canvas: std::sync::Arc<dyn local_agent_adapter::CanvasOperationAdapter>, project_id: String, task_id: String) -> Result<(), BridgeError> {
+        crate::paid_generation::start_generation(canvas, self.clone(), self.local_media.clone(), project_id, task_id).map_err(BridgeError::unavailable)
+    }
+
     fn report(&self) -> Result<Value, BridgeError> {
         serde_json::to_value(self.report())
             .map_err(|_| BridgeError::internal("The desktop runtime report could not be encoded."))

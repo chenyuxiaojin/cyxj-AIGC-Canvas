@@ -362,13 +362,22 @@ fn real_http_transfers_and_command_receipts_are_shared_with_cli() {
     assert_eq!(client.download(&format!("/v1/projects/project-1/transfers/{id}")).unwrap(), bytes);
     let request=json!({"project_id":"project-1","request_id":"external-generation","base_revision":fixture.canvas.get_project("project-1").unwrap().revision,"action":"generate_image","arguments":{"prompt":"隔离测试，不调用上游"}});
     let receipt=client.post("/v1/canvas/commands",&request).unwrap();
-    assert_eq!(receipt["data"]["status"],"pending_approval");
+    assert_eq!(receipt["data"]["status"],"queued");
     assert_eq!(client.post("/v1/canvas/commands",&request).unwrap()["data"]["duplicate"],true);
     let output=Command::new(cargo_bin("infinite-canvas")).args(["--endpoint",&fixture.endpoint(),"--credential-file",fixture.credentials.path().to_str().unwrap(),"tasks","get","project-1","external-generation"]).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let result:Value=serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["data"]["task_id"],"external-generation");
-    assert_eq!(result["data"]["status"],"pending_approval");
+    assert_eq!(result["data"]["status"],"queued");
     client.post("/v1/projects/project-1/commands/external-generation/cancel",&json!({})).unwrap();
     assert_eq!(fixture.canvas.command_status("project-1","external-generation").unwrap()["status"],"cancelled");
+}
+
+#[test]
+fn generation_capability_does_not_advertise_removed_approval() {
+    let fixture = Fixture::new();
+    let value = fixture.client().get("/v1/capabilities").unwrap();
+    let encoded = serde_json::to_string(&value).unwrap();
+    assert!(!encoded.contains("paid_write_pending_human_approval"));
+    assert!(!encoded.contains("\"approval_required\":true"));
 }

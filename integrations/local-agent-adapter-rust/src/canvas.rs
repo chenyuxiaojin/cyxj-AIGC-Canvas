@@ -409,6 +409,11 @@ impl SqliteCanvasAdapter {
     }
 
     pub fn save_human_project_checked(&self, project: Value, expected_revision: Option<&str>) -> Result<Value, BridgeError> {
+        self.save_human_document_checked(project, expected_revision).map(|document| document.project)
+    }
+
+    // Return the exact committed document; a second SELECT could observe another writer.
+    pub fn save_human_document_checked(&self, project: Value, expected_revision: Option<&str>) -> Result<ProjectDocument, BridgeError> {
         let metadata = project_metadata(&project)?;
         let raw = serde_json::to_string(&project)
             .map_err(|_| BridgeError::invalid("The canvas project could not be encoded."))?;
@@ -430,13 +435,17 @@ impl SqliteCanvasAdapter {
                 },
             )
             .optional()?;
+        if current.as_ref().is_some_and(|(_, _, deleted)| !deleted.is_empty()) {
+            return Err(BridgeError::conflict("PROJECT_DELETED", "画布已删除，当前编辑可另存为副本。"));
+        }
         if let Some(expected) = expected_revision {
             let matches = match &current {
                 Some((raw, _, deleted)) => deleted.is_empty() && revision(raw.as_bytes()) == expected,
                 None => expected.is_empty(),
             };
             if !matches {
-                return Err(BridgeError::conflict("REVISION_CONFLICT", "画布已有其他修改，当前编辑已保留，请核对后重试。"));
+                return Err(BridgeError::conflict("REVISION_CONFLICT", "画布已有其他修改，请比较后选择最新版本或另存当前编辑。")
+                    .with_details(json!({"current_revision": current.as_ref().map(|(raw, _, _)| revision(raw.as_bytes()))})));
             }
         }
         let previous_raw = current.as_ref().map(|(raw, _, _)| raw.clone());
@@ -448,7 +457,7 @@ impl SqliteCanvasAdapter {
                 ));
             }
             Some((current_raw, current_updated, _))
-                if timestamp_is_newer(&current_updated, &metadata.updated_at)? =>
+                if expected_revision.is_none() && timestamp_is_newer(&current_updated, &metadata.updated_at)? =>
             {
                 serde_json::from_str(&current_raw).map_err(|_| {
                     BridgeError::internal("A desktop canvas project contains invalid JSON.")
@@ -480,8 +489,12 @@ impl SqliteCanvasAdapter {
             }
         };
         crate::history::record_save(&transaction, DESKTOP_LOCAL_USER_ID, &metadata.id, previous_raw.as_deref(), &serde_json::to_string(&saved).map_err(|_|BridgeError::internal("无法记录保存版本"))?)?;
+        let committed_raw: String = transaction.query_row(
+            "SELECT project_data FROM canvas_projects WHERE user_id=?1 AND id=?2",
+            params![DESKTOP_LOCAL_USER_ID, metadata.id], |row| row.get(0))?;
+        let document = ProjectDocument { project: saved, revision: revision(committed_raw.as_bytes()) };
         transaction.commit()?;
-        Ok(saved)
+        Ok(document)
     }
 
     pub fn history_list(&self, id: &str) -> Result<Value, BridgeError> {
@@ -1678,6 +1691,24 @@ mod tests {
         adapter.delete_human_projects(&["project-1".into()]).unwrap();
         assert_eq!(adapter.deleted_project_ids().unwrap(),vec!["project-1"]);
         assert!(adapter.save_human_project_checked(first,Some("")).is_err());
+    }
+
+    #[test]
+    fn human_receipt_is_exact_even_after_another_write_and_checked_save_ignores_clock_skew() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = directory.path().join("canvas.db");
+        Connection::open(&db).unwrap().execute_batch("CREATE TABLE canvas_projects (user_id TEXT NOT NULL, id TEXT NOT NULL, project_data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(user_id,id));").unwrap();
+        let adapter = SqliteCanvasAdapter::open(db).unwrap();
+        let first = adapter.save_human_document_checked(project(), Some("")).unwrap();
+        let mut next = project(); next["title"] = json!("second"); next["updatedAt"] = json!("2025-12-31T23:59:59Z");
+        let second = adapter.save_human_document_checked(next.clone(), Some(&first.revision)).unwrap();
+        assert_eq!(second.project, next);
+        assert_ne!(first.revision, second.revision);
+        assert_eq!(first.project["title"], "Project");
+        assert_eq!(second.revision, adapter.get_project("project-1").unwrap().revision);
+        let conflict = adapter.save_human_document_checked(project(), Some(&first.revision)).unwrap_err();
+        assert_eq!(conflict.code, "REVISION_CONFLICT");
+        assert_eq!(conflict.details.unwrap()["current_revision"], second.revision);
     }
 
     fn project() -> Value {

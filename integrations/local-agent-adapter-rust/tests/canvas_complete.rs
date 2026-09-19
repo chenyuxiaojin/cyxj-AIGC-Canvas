@@ -137,19 +137,13 @@ fn invalid_and_locked_edits_roll_back_entire_batch_and_keep_unknown_fields() {
 }
 
 #[test]
-fn commands_require_real_approval_claim_once_and_never_replay_on_restart() {
+fn generation_queues_directly_claims_once_and_never_replays_on_restart() {
     let (dir, adapter) = fixture();
     let request = command(&adapter, "image-generation", "generate_image");
     assert_eq!(
         adapter.submit_command(request.clone()).unwrap()["status"],
-        "pending_approval"
+        "queued"
     );
-    assert!(adapter
-        .claim_canvas_command("film", "image-generation")
-        .is_err());
-    adapter
-        .approve_canvas_command("film", "image-generation", true, false)
-        .unwrap();
     adapter
         .claim_canvas_command("film", "image-generation")
         .unwrap();
@@ -298,7 +292,7 @@ fn invalid_view_settings_and_locked_group_membership_do_not_corrupt_the_document
 }
 
 #[test]
-fn special_generation_needs_approval_and_claim_preserves_exact_before_media() {
+fn special_generation_queues_directly_and_claim_preserves_exact_before_media() {
     let (_dir, adapter) = fixture();
     let mut original = adapter.get_project("film").unwrap().project;
     original["nodes"] = json!([node("image", "image")]);
@@ -306,10 +300,8 @@ fn special_generation_needs_approval_and_claim_preserves_exact_before_media() {
     adapter.save_human_project(original).unwrap();
     let before = adapter.get_project("film").unwrap();
     for action in ["mask_edit_image", "generate_angle", "retry_node"] {
-        assert_eq!(adapter.submit_command(command(&adapter,action,action)).unwrap()["status"],"pending_approval");
-        assert!(adapter.claim_canvas_command("film",action).is_err());
+        assert_eq!(adapter.submit_command(command(&adapter,action,action)).unwrap()["status"],"queued");
     }
-    adapter.approve_canvas_command("film","retry_node",true,false).unwrap();
     adapter.claim_canvas_command("film","retry_node").unwrap();
     let entries = adapter.history_list("film").unwrap();
     assert!(entries.as_array().unwrap().iter().any(|entry|entry["revision"]==before.revision));
@@ -336,4 +328,19 @@ fn task_history_includes_terminal_states_paginates_and_keeps_interrupted_out_of_
     adapter.recover_canvas_commands().unwrap();
     assert_eq!(adapter.canvas_commands(None).unwrap(),json!([]));
     assert_eq!(adapter.command_status("film","interrupted").unwrap()["status"],"interrupted");
+}
+
+#[test]
+fn save_recovery_commands_share_the_queue_and_require_the_inspected_draft() {
+    let (_dir, adapter) = fixture();
+    assert_eq!(adapter.submit_command(command(&adapter,"inspect","save_inspect")).unwrap()["status"],"queued");
+    for action in ["save_copy", "save_use_latest"] {
+        let mut request=command(&adapter,action,action);
+        assert_eq!(adapter.submit_command(request.clone()).unwrap_err().code,"INVALID_REQUEST");
+        request.arguments=json!({"draftToken":"session:1"});
+        assert_eq!(adapter.submit_command(request.clone()).unwrap()["status"],"queued");
+        adapter.claim_canvas_command("film",action).unwrap();
+        adapter.finish_canvas_command("film",action,json!({"ok":true,"archiveKey":"fixture-only"})).unwrap();
+        assert_eq!(adapter.submit_command(request).unwrap()["duplicate"],true);
+    }
 }

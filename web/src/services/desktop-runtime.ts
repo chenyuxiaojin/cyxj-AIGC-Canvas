@@ -175,18 +175,33 @@ export function listDesktopCanvasProjects<T>() {
 
 export async function loadDesktopCanvasProjects<T>() {
     const projectIds = await invoke<string[]>("desktop_canvas_project_ids");
-    return Promise.all(
-        projectIds.map(async (projectId) => {
-            const document = await invoke<{ project: T; revision: string }>("desktop_canvas_document", { projectId });
-            return { ...document.project, __desktopRevision: document.revision };
-        }),
-    );
+    const results = await Promise.allSettled(projectIds.map((id) => loadDesktopCanvasProject<T>(id)));
+    const projects = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+    const failures = results.flatMap((result, index) => result.status === "rejected" ? [{ id: projectIds[index], error: result.reason }] : []);
+    return { projects, failures };
 }
 
+export class CanvasPersistenceError extends Error {
+    constructor(public code: string, message: string, public details?: unknown) { super(message); }
+}
+export function canvasPersistenceError(error: unknown): CanvasPersistenceError {
+    if (error instanceof CanvasPersistenceError) return error;
+    const envelope = error as { error?: { code?: string; message?: string; details?: unknown }; code?: string; message?: string };
+    const body = envelope?.error || envelope;
+    return new CanvasPersistenceError(body?.code || "SAVE_FAILED", body?.message || String(error), envelope?.error?.details);
+}
+export async function loadDesktopCanvasProject<T>(projectId: string) {
+    try {
+        const document = await invoke<{ project: T; revision: string }>("desktop_canvas_document", { projectId });
+        return { ...document.project, __desktopRevision: document.revision };
+    } catch (error) { throw canvasPersistenceError(error); }
+}
 export async function saveDesktopCanvasProject<T>(project: T) {
     const { __desktopRevision, ...content } = project as T & { __desktopRevision?: string };
-    const document = await invoke<{ project: T; revision: string }>("save_desktop_canvas_project", { project: content, expectedRevision: __desktopRevision || "" });
-    return { ...document.project, __desktopRevision: document.revision };
+    try {
+        const document = await invoke<{ project: T; revision: string }>("save_desktop_canvas_project", { project: content, expectedRevision: __desktopRevision || "" });
+        return { ...document.project, __desktopRevision: document.revision };
+    } catch (error) { throw canvasPersistenceError(error); }
 }
 
 export function deleteDesktopCanvasProjects(projectIds: string[]) {

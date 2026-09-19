@@ -75,7 +75,7 @@ import { CanvasNodeCreateMenu } from "../components/canvas-node-create-menu";
 import { CanvasZoomControls } from "../components/canvas-zoom-controls";
 import { CANVAS_ASSET_DRAG_TYPE, CanvasSidePanel } from "../components/canvas-side-panel";
 import { DEFAULT_CANVAS_AGENT_PANEL, DEFAULT_CANVAS_SIDE_PANEL, useCanvasStore, acceptDesktopCanvasDocument } from "../stores/use-canvas-store";
-import { listCanvasCommandHistory, registerCanvasExecutor, readCanvasTransfer, writeCanvasTransfer, readCanvasDocument, submitCanvasCommand, getCanvasCommand, approveCanvasCommand, applyDesktopCanvasOperations, type CanvasCommand, type CanvasDocument, type CanvasExecutor } from "@/services/canvas-commands";
+import { listCanvasCommandHistory, registerCanvasExecutor, readCanvasTransfer, writeCanvasTransfer, readCanvasDocument, submitCanvasCommand, getCanvasCommand, applyDesktopCanvasOperations, type CanvasCommand, type CanvasDocument, type CanvasExecutor } from "@/services/canvas-commands";
 import { CanvasSequentialPlayer } from "../components/canvas-sequential-player";
 import { createCanvasArchive } from "../utils/canvas-export";
 import { importCanvasArchive } from "../utils/canvas-import";
@@ -394,9 +394,9 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     const resolvedAgentConfig = useMemo<CanvasAgentConfig>(
         () =>
             agentConfig
-                ? { autoGenerateMedia: false, ...agentConfig }
+                ? { ...agentConfig, autoGenerateMedia: true }
                 : {
-                    autoGenerateMedia: false,
+                    autoGenerateMedia: true,
                     imageQuality: effectiveConfig.quality,
                     imageSize: effectiveConfig.size,
                     videoQuality: effectiveConfig.vquality,
@@ -667,6 +667,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     useEffect(() => {
         if (!projectLoaded) return;
         const pollCanvasTasks = () => {
+            if (["conflict", "resolving"].includes(useCanvasStore.getState().saveStatus[projectId]?.state)) return;
             const videoTargets = nodesRef.current.filter((node) => node.type === CanvasNodeType.Video && node.metadata?.status === NODE_STATUS_LOADING && !node.metadata.content && canvasVideoTaskId(node.metadata));
             videoTargets.forEach((node) => {
                 if (pollingVideoNodeIdsRef.current.has(node.id)) return;
@@ -4392,7 +4393,9 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         const project = document.project;
         const local = useCanvasStore.getState().projects.find((item) => item.id === projectId);
         if (local && (!equal(local.nodes, nodesRef.current) || !equal(local.connections, connectionsRef.current))) throw new Error("画布有尚未保存的编辑，已保留当前内容");
-        acceptDesktopCanvasDocument(project, document.revision);
+        // Publish the store and editor snapshot in the same tick. Awaiting the
+        // cache first lets the old editor effect overwrite the new revision.
+        const persistence = acceptDesktopCanvasDocument(project, document.revision);
         historyRef.current.past = [...historyRef.current.past.slice(-49), createHistoryEntry()];
         historyRef.current.future = [];
         const snapshot = {
@@ -4411,6 +4414,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         setSelectedNodeIds((selected) => new Set([...selected].filter((id) => snapshot.nodes.some((node) => node.id === id))));
         lastHistoryRef.current = { nodes: snapshot.nodes, connections: snapshot.connections, backgroundMode: snapshot.backgroundMode, showImageInfo: snapshot.showImageInfo };
         setHistoryState({ canUndo: true, canRedo: false });
+        await persistence;
     }, [createHistoryEntry, projectId]);
 
     const executeRetryNode = useCallback(
@@ -4844,7 +4848,8 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
             return { ok: true, ...task, taskId: task.task_id };
         }
         if (isCanvasAgentMediaAction(action) || action.name === "canvas_task") {
-            await flushCanvasForAgent();
+            const isRecovery = action.name === "canvas_task" && ["save_inspect", "save_use_latest", "save_copy"].includes(String(action.arguments.command));
+            if (!isRecovery) await flushCanvasForAgent();
             const document = await readCanvasDocument(projectId);
             const args = action.name === "canvas_task" ? (action.arguments.arguments as Record<string, unknown>) : { ...action.arguments, sourceNodeIds: action.arguments.sourceNodeIds || referenceIds };
             const task = await submitCanvasCommand({ project_id: projectId, request_id: action.id, base_revision: document.revision, action: action.name === "canvas_task" ? String(action.arguments.command) : action.name, arguments: args });
@@ -4864,8 +4869,6 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
             await flushCanvasForAgent();
             const document = await readCanvasDocument(projectId);
             const task = await submitCanvasCommand({ project_id: projectId, request_id: nanoid(), base_revision: document.revision, action, arguments: args });
-            // The explicit UI action authorizes this exact request only.
-            if (task.status === "pending_approval") await approveCanvasCommand(task, true);
             message.success("任务已加入队列");
             return task;
         } finally { manualCommandPending.current = false; }
@@ -5204,7 +5207,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     useEffect(() => {
         if (!projectLoaded || consumedAgentRequestProjectRef.current === projectId) return;
         const request = useCanvasStore.getState().projects.find((project) => project.id === projectId)?.pendingAgentRequest;
-        if (!request) return;
+        if (!request || ["conflict", "resolving"].includes(useCanvasStore.getState().saveStatus[projectId]?.state)) return;
         consumedAgentRequestProjectRef.current = projectId;
 
         void (async () => {

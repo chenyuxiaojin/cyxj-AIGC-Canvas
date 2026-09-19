@@ -18,6 +18,7 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 
 struct MockRuntime;
+static GENERATION_STARTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 struct FixtureProtocol;
 
@@ -129,6 +130,10 @@ impl CanvasProtocolExecutor for FixtureProtocol {
 }
 
 impl AgentRuntime for MockRuntime {
+    fn start_video_generation(self: Arc<Self>, _canvas: Arc<dyn CanvasOperationAdapter>, _project_id: String, _task_id: String) -> Result<(), BridgeError> {
+        GENERATION_STARTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
     fn report(&self) -> Result<Value, BridgeError> {
         Ok(json!({ "transport": "mock", "paid": false }))
     }
@@ -745,7 +750,7 @@ fn allowlisted_image_ingest_creates_one_final_image_node_without_playback_urls()
 }
 
 #[test]
-fn paid_video_generation_only_creates_a_pending_approval_task_and_placeholder() {
+fn paid_video_generation_queues_and_starts_once_without_canvas_approval() {
     let fixture = Fixture::new();
     let ingest = ImageIngestRequest {
         project_id: "project-1".to_owned(),
@@ -788,9 +793,9 @@ fn paid_video_generation_only_creates_a_pending_approval_task_and_placeholder() 
         .client()
         .post("/v1/generation/video-requests", &request)
         .unwrap();
-    assert_eq!(first["data"]["status"], "pending_approval");
+    assert_eq!(first["data"]["status"], "queued");
     assert_eq!(first["data"]["paid"], true);
-    assert_eq!(first["data"]["approval_required"], true);
+    assert_eq!(first["data"]["approval_required"], false);
     assert_eq!(first["data"]["duplicate"], false);
     assert_eq!(first["data"]["canvas_task_id"], "paid-gen-paid-request-1");
     assert_eq!(first["data"]["canvas_revision"], 2);
@@ -803,6 +808,7 @@ fn paid_video_generation_only_creates_a_pending_approval_task_and_placeholder() 
         .unwrap();
     assert_eq!(duplicate["data"]["duplicate"], true);
     assert_eq!(duplicate["data"]["canvas_revision"], 2);
+    assert_eq!(GENERATION_STARTS.load(std::sync::atomic::Ordering::SeqCst), 1);
 
     let project = fixture.canvas.get_project("project-1").unwrap();
     assert_eq!(project.project["operationState"]["revision"], 2);
@@ -814,10 +820,10 @@ fn paid_video_generation_only_creates_a_pending_approval_task_and_placeholder() 
         .find(|node| node["id"] == "gen-1")
         .unwrap();
     assert_eq!(generated["type"], "video");
-    assert_eq!(generated["metadata"]["status"], "pending_approval");
+    assert_eq!(generated["metadata"]["status"], "loading");
     assert_eq!(generated["metadata"]["imageNodeId"], "keyframe-1");
     let task = &project.project["operationState"]["tasks"]["paid-gen-paid-request-1"];
-    assert_eq!(task["status"], "pending_approval");
+    assert_eq!(task["status"], "queued");
     assert_eq!(task["kind"], "paid_video_generation");
     assert_eq!(task["details"]["paid"], true);
     assert_eq!(task["details"]["prompt"], "镜头缓推，全景剪影，写实光线");
