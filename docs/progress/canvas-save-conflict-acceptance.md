@@ -17,7 +17,7 @@
 | --- | --- | --- |
 | 真实保存 store / 恢复 / 原素材协议 | 25 通过 | `node --test docs/progress/canvas-repair.test.mjs` |
 | 页面外部同步与自动保存时序 | 3 通过 | `node --test docs/progress/canvas-save-sync.test.mjs` |
-| 真实任务分发模块，替身 IPC | 4 通过 | `node --test docs/progress/canvas-save-dispatch.test.mjs` |
+| 真实任务分发与助手动作，替身 IPC | 6 通过 | `node --test docs/progress/canvas-save-dispatch.test.mjs` |
 | 画布协议、操作 store、既有 Omni Flash | 27 通过 | `bun test tests/canvas-operation-protocol.test.ts tests/canvas-store-operation.test.ts tests/omni-flash-video.test.tsx` |
 | 界面收敛及 R9 运行时 | 19 通过 | `canvas-ui-optimization.test.mjs` / `canvas-r9-runtime.test.mjs` |
 | Rust Agent 适配器 | 49 通过 | `cargo test --locked --manifest-path integrations/local-agent-adapter-rust/Cargo.toml` |

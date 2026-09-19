@@ -37,7 +37,7 @@ import { createCanvasAgentState, runCanvasAgent } from "../agent/canvas-agent-ru
 import { runCanvasCodex } from "../agent/canvas-codex-runtime";
 import { runCanvasLocalAgent } from "../agent/canvas-local-agent-runtime";
 import type { CanvasAgentContext } from "../agent/canvas-agent-context";
-import { isCanvasAgentMediaAction, type CanvasAgentAction, type CanvasAgentToolResult } from "../agent/canvas-agent-tools";
+import { type CanvasAgentAction, type CanvasAgentToolResult } from "../agent/canvas-agent-tools";
 import {
     CanvasNodeType,
     type CanvasAgentConfig,
@@ -375,13 +375,11 @@ export function CanvasAssistantPanel({
                 getContext: getAgentContext,
                 executeAction: async (action: CanvasAgentAction): Promise<CanvasAgentToolResult> => {
                     if (controller.signal.aborted) throw new DOMException("已停止", "AbortError");
-                    if (isCanvasAgentMediaAction(action)) return onExecuteAction(action, messageReferenceNodeIds);
-                    const media = provider !== "api" && isCanvasAgentMediaAction(action);
                     const connectionDelete = provider !== "api" && action.name === "delete_connection";
-                    if (action.name !== "delete_node" && !media && !connectionDelete) { const result = await onExecuteAction(action, messageReferenceNodeIds); onAgentActionResult({ batchId, action, result }); return result; }
+                    if (action.name !== "delete_node" && !connectionDelete) { const result = await onExecuteAction(action, messageReferenceNodeIds); onAgentActionResult({ batchId, action, result }); return result; }
                     const nodeId = typeof action.arguments.nodeId === "string" ? action.arguments.nodeId : "";
                     const node = nodes.find((item) => item.id === nodeId);
-                    const confirmed = await requestConfirmation({ title: media ? String(action.arguments.title || action.arguments.prompt || "媒体生成").slice(0, 80) : connectionDelete ? `连线 ${action.arguments.connectionId}` : node?.title || "未命名节点", media });
+                    const confirmed = await requestConfirmation({ title: connectionDelete ? `连线 ${action.arguments.connectionId}` : node?.title || "未命名节点" });
                     if (controller.signal.aborted) throw new DOMException("已停止", "AbortError");
                     const result: CanvasAgentToolResult = confirmed ? await onExecuteAction(action, messageReferenceNodeIds) : { ok: false, code: "action_cancelled", message: "用户取消本次操作，不要自动重试" };
                     onAgentActionResult({ batchId, action, result });

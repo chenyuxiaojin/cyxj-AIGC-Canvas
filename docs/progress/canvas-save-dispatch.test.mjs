@@ -37,3 +37,15 @@ test('recovery inspection and choices bypass conflicted ordinary flush',async()=
 test('opening a canvas remains possible from a conflicted editor',async()=>{
  const h=await harness('open_project','queued','conflict');assert.equal(h.calls.some(c=>c[0]==='navigate'),true);await h.poll();assert.equal(h.task.status,'succeeded');h.close();
 });
+
+const panel=readFileSync(new URL('../../web/src/app/(user)/canvas/components/canvas-assistant-panel.tsx',import.meta.url),'utf8');
+const actionStart=panel.indexOf('                executeAction: async (action: CanvasAgentAction)');
+const actionEnd=panel.indexOf('                signal: controller.signal,',actionStart);
+const actionCode=ts.transpileModule('const runtime={'+panel.slice(actionStart,actionEnd)+'}; exports.run=runtime.executeAction;',{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
+for(const name of ['generate_video','delete_node'])test(`assistant ${name} keeps result reporting and only deletion asks for confirmation`,async()=>{
+ let executions=0,confirmations=0,reports=0;
+ const context={exports:{},provider:'codex',controller:new AbortController(),messageReferenceNodeIds:[],nodes:[],batchId:'fixture',
+  onExecuteAction:async()=>{executions++;return {ok:true}},onAgentActionResult:()=>{reports++},requestConfirmation:async()=>{confirmations++;return true}};
+ vm.runInNewContext(actionCode,context);const result=await context.exports.run({name,arguments:{nodeId:'fixture'}});
+ assert.equal(result.ok,true);assert.equal(executions,1);assert.equal(reports,1);assert.equal(confirmations,name==='delete_node'?1:0);
+});
