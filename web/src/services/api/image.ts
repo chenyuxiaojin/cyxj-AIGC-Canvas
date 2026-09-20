@@ -1,3 +1,5 @@
+import { persistCanvasInlineImage } from "@/services/canvas-inline-media";
+import type { CanvasNodeMetadata } from "@/app/(user)/canvas/types";
 import { mediaPublicUrl } from "@/services/media-public-url";
 import axios from "axios";
 
@@ -40,6 +42,7 @@ type ChatImagesApiResponse = {
 
 type GeneratedImage = { id: string; dataUrl: string; seed?: number };
 export type CanvasImageTask = {
+    media?: Record<string, CanvasNodeMetadata>;
     id: string;
     parent_task_id?: string;
     object?: string;
@@ -1006,7 +1009,7 @@ export async function createCanvasImageTask(config: AiConfig & { seedIndex?: num
         const images = await requestImages({ ...config, count: "1" }, prompt, references);
         const [image] = images;
         if (!image) throw new Error("接口没有返回图片");
-        return {
+        return normalizeCanvasImageTask({
             id: options.clientTaskId || nanoid(),
             source: options.source || "canvas",
             source_id: options.sourceId || "",
@@ -1017,7 +1020,7 @@ export async function createCanvasImageTask(config: AiConfig & { seedIndex?: num
             progress: 100,
             image_url: image.dataUrl,
             ...(isKIESeedreamLayerDecompositionModel(config.model) ? { image_urls: images.map((item) => item.dataUrl) } : {}),
-        };
+        });
     }
     const params = createImageRequestParams({ ...config, count: "1" });
     const request = await createCanvasImageTaskRequest({ ...config, count: "1" }, prompt, references, params, options);
@@ -1029,7 +1032,7 @@ export async function createCanvasImageTask(config: AiConfig & { seedIndex?: num
     const payload = (await response.json()) as { code?: number; msg?: string; data?: CanvasImageTask };
     if (payload.code !== 0 || !payload.data) throw new ImageRequestError(payload.msg || "图片任务创建失败", payload);
     refreshRemoteUser(config);
-    return payload.data;
+    return normalizeCanvasImageTask(payload.data);
 }
 
 export async function pollCanvasImageTaskStatus(taskId: string): Promise<CanvasImageTask> {
@@ -1044,7 +1047,7 @@ export async function pollCanvasImageTaskStatus(taskId: string): Promise<CanvasI
     }
     const payload = (await response.json()) as { code?: number; msg?: string; data?: CanvasImageTask };
     if (payload.code !== 0 || !payload.data) throw new ImageRequestError(payload.msg || "读取图片任务失败", payload);
-    return payload.data;
+    return normalizeCanvasImageTask(payload.data);
 }
 
 async function createCanvasImageTaskRequest(config: AiConfig & { seedIndex?: number; seedCount?: number }, prompt: string, references: ReferenceImage[], params: ImageRequestParams, options: CanvasImageTaskOptions): Promise<RequestInit> {
@@ -1518,7 +1521,9 @@ export async function listCanvasImageTasks(config: AiConfig, sources: Array<"ima
     }
     const payload = (await response.json()) as { code?: number; msg?: string; data?: CanvasImageTask[] };
     if (payload.code !== 0 || !Array.isArray(payload.data)) throw new ImageRequestError(payload.msg || "读取图片任务失败", payload);
-    return payload.data;
+    const tasks: CanvasImageTask[] = [];
+    for (const task of payload.data) tasks.push(await normalizeCanvasImageTask(task));
+    return tasks;
 }
 
 export async function batchCanvasImageTaskStatus(config: AiConfig, ids: string[]) {
@@ -1535,7 +1540,9 @@ export async function batchCanvasImageTaskStatus(config: AiConfig, ids: string[]
     }
     const payload = (await response.json()) as { code?: number; msg?: string; data?: CanvasImageTask[] };
     if (payload.code !== 0 || !Array.isArray(payload.data)) throw new ImageRequestError(payload.msg || "读取图片任务失败", payload);
-    return payload.data;
+    const tasks: CanvasImageTask[] = [];
+    for (const task of payload.data) tasks.push(await normalizeCanvasImageTask(task));
+    return tasks;
 }
 
 export async function deleteCanvasImageTask(config: AiConfig, task?: CanvasImageTask | null) {
@@ -1550,4 +1557,19 @@ export async function deleteCanvasImageTask(config: AiConfig, task?: CanvasImage
     }
     const payload = (await response.json()) as { code?: number; msg?: string };
     if (payload.code !== 0) throw new ImageRequestError(payload.msg || "删除图片任务失败", payload);
+}
+
+export async function normalizeCanvasImageTask(task: CanvasImageTask): Promise<CanvasImageTask> {
+    const next = { ...task, media: { ...task.media } };
+    const urls = [...new Set([task.url, task.image_url, ...(task.image_urls || [])].filter((url): url is string => Boolean(url)))];
+    for (const url of urls) {
+        if (!url.startsWith("data:image/")) continue;
+        const metadata = await persistCanvasInlineImage(url);
+        const key = metadata.storageKey!;
+        next.media[key] = metadata;
+        if (next.url === url) next.url = key;
+        if (next.image_url === url) next.image_url = key;
+        if (next.image_urls) next.image_urls = next.image_urls.map(value => value === url ? key : value);
+    }
+    return next;
 }

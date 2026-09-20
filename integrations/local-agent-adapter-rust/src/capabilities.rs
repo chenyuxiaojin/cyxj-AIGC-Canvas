@@ -102,7 +102,7 @@ pub fn catalog() -> Value {
             {"id":"canvas.commands.cancel","method":"POST","path":"/v1/projects/{project_id}/commands/{request_id}/cancel","risk":"reversible_write","paid":false,"note":"Running remote work may continue; cancel_requested does not mean provider cancellation."},
             {"id":"media.upload","method":"POST","path":"/v1/projects/{project_id}/transfers","content_type":"application/octet-stream","max_bytes":crate::transfers::MAX_BYTES,"paid":false},
             {"id":"media.download","method":"GET","path":"/v1/projects/{project_id}/transfers/{artifact_id}","content_type":"application/octet-stream","paid":false},
-            {"id":"projects.actions","method":"POST","path":"/v1/projects/{project_id}/actions","actions":["create","history","preview","restore"],"risk":"action_dependent","paid":false},
+            {"id":"projects.actions","method":"POST","path":"/v1/projects/{project_id}/actions","actions":["create","history","preview","restore","status","node"],"risk":"action_dependent","paid":false},
             {
                 "id": "runtime.probe",
                 "method": "GET",

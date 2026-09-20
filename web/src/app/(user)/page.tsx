@@ -105,8 +105,8 @@ export default function MyCanvasesPage() {
                                 <div className="mt-1 truncate text-2xl font-semibold">{latestProject.title || "未命名片子"}</div>
                                 <CanvasBindingLabel projectId={latestProject.id} />
                                 <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-stone-500 dark:text-stone-400">
-                                    <span>{latestProject.nodes?.length || 0} 个节点</span>
-                                    <span>{latestProject.connections?.length || 0} 条连线</span>
+                                    <span>{latestProject.__desktopSummary ? latestProject.nodeCount : latestProject.nodes?.length || 0} 个节点</span>
+                                    <span>{latestProject.__desktopSummary ? latestProject.connectionCount : latestProject.connections?.length || 0} 条连线</span>
                                     <span>{new Date(latestProject.updatedAt).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
                                 </div>
                             </div>

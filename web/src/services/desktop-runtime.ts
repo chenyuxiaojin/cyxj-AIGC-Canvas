@@ -173,11 +173,19 @@ export function listDesktopCanvasProjects<T>() {
     return invoke<T[]>("desktop_canvas_projects");
 }
 
-export async function loadDesktopCanvasProjects<T>() {
-    const projectIds = await invoke<string[]>("desktop_canvas_project_ids");
-    const results = await Promise.allSettled(projectIds.map((id) => loadDesktopCanvasProject<T>(id)));
-    const projects = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
-    const failures = results.flatMap((result, index) => result.status === "rejected" ? [{ id: projectIds[index], error: result.reason }] : []);
+export async function loadDesktopCanvasProjects<T extends { id: string; updatedAt: string; __desktopSummary?: boolean }>(known: T[] = [], requestedIds: string[] = []) {
+    const summaries = await invoke<T[]>("desktop_canvas_summaries");
+    const projects: T[] = [], failures: Array<{ id: string; error: unknown }> = [];
+    for (const summary of summaries) {
+        const previous = known.find(project => project.id === summary.id);
+        if (!requestedIds.includes(summary.id) && (!previous || previous.__desktopSummary)) { projects.push({ ...previous, ...summary }); continue; }
+        try {
+            // Sequential and revision-aware: unchanged open projects reuse the current object.
+            const revision = await getDesktopCanvasProjectRevision(summary.id);
+            if (previous && !previous.__desktopSummary && (previous as T & { __desktopRevision?: string }).__desktopRevision === revision) projects.push(previous);
+            else projects.push(await loadDesktopCanvasProject<T>(summary.id));
+        } catch (error) { failures.push({ id: summary.id, error }); }
+    }
     return { projects, failures };
 }
 
@@ -197,6 +205,7 @@ export async function loadDesktopCanvasProject<T>(projectId: string) {
     } catch (error) { throw canvasPersistenceError(error); }
 }
 export async function saveDesktopCanvasProject<T>(project: T) {
+    if ((project as { __desktopSummary?: boolean }).__desktopSummary) throw new Error("请先读取完整画布再保存");
     const { __desktopRevision, ...content } = project as T & { __desktopRevision?: string };
     try {
         const document = await invoke<{ project: T; revision: string }>("save_desktop_canvas_project", { project: content, expectedRevision: __desktopRevision || "" });

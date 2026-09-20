@@ -32,3 +32,5 @@ pub use runtime::{
 };
 pub use server::{BridgeServer, BRIDGE_PORT};
 pub use commands::CanvasCommandRequest;
+
+pub mod inline_media;

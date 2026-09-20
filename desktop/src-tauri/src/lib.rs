@@ -349,6 +349,8 @@ pub fn run() {
             runtime::desktop_task_media_reference,
             runtime::cancel_desktop_task,
             agent_bridge::desktop_canvas_projects,
+            agent_bridge::desktop_canvas_summaries,
+            agent_bridge::desktop_store_inline_media,
             agent_bridge::desktop_canvas_project_ids,
             agent_bridge::desktop_canvas_document,
             agent_bridge::desktop_canvas_operations,

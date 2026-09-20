@@ -382,7 +382,7 @@ export function applyCanvasOperationBatch<TProject extends CanvasProtocolProject
     }
 
     const previousRevision = state.revision;
-    const undoSnapshot = snapshot(project);
+    const undoSnapshot = batch.actor === "agent" ? snapshot(project) : undefined;
     const operationResults: CanvasOperationResultItem[] = [];
 
     try {

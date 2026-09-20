@@ -292,3 +292,43 @@ test('an interrupted adoption after the durable marker restores latest instead o
  const restart=await storeHarness({storage:h.values,database:h.database});await restart.store.getState().refreshFromDesktop();
  assert.equal(restart.writes.length,0);assert.equal(restart.store.getState().openProject(original.id).nodes[0].metadata.content,'external latest');
 });
+
+
+test('burst edits coalesce draft checkpoints while preserving the final durable edit',async()=>{
+ const h=await storeHarness();let journals=0;
+ h.beforeLocalWrite(async key=>{if(key.startsWith('infinite-canvas:save-journal:')) {journals++;await tick(5);}});
+ for(let i=0;i<300;i++) h.store.getState().updateProject(original.id,{nodes:[{...original.nodes[0],metadata:{content:'burst '+i}}]});
+ await h.store.getState().retrySave(original.id);
+ assert.equal(h.database.get(original.id).nodes[0].metadata.content,'burst 299');
+ assert.ok(journals<=4,`expected merged checkpoints, got ${journals}`);
+ assert.equal(h.values.has('infinite-canvas:save-journal:'+original.id),false);
+});
+
+test('desktop listing fetches summaries and only opens the requested body, sequentially',async()=>{
+ const calls=[];let active=0,peak=0;
+ const service=load('services/desktop-runtime.ts',{'@tauri-apps/api/core':{invoke:async(name,args)=>{
+  calls.push([name,args]);active++;peak=Math.max(peak,active);await tick();active--;
+  if(name==='desktop_canvas_summaries')return [{id:'one',updatedAt:'same',__desktopSummary:true},{id:'two',updatedAt:'same',__desktopSummary:true}];
+  if(name==='desktop_canvas_project_revision')return 'r1';
+  if(name==='desktop_canvas_document')return {project:{id:args.projectId,updatedAt:'same',nodes:[{id:'image'}]},revision:'r1'};
+  throw Error(name);
+ }}});
+ const listed=await service.loadDesktopCanvasProjects();assert.equal(calls.length,1);assert.equal(listed.projects.length,2);
+ const opened=await service.loadDesktopCanvasProjects(listed.projects,['two']);assert.equal(opened.projects[1].nodes.length,1);
+ assert.equal(calls.filter(c=>c[0]==='desktop_canvas_document').length,1);assert.equal(peak,1);
+ await service.loadDesktopCanvasProjects(opened.projects,['two']);assert.equal(calls.filter(c=>c[0]==='desktop_canvas_document').length,1);
+});
+
+
+test('inline image task results are persisted once before entering canvas metadata',async()=>{
+ const source=readFileSync(new URL('../../web/src/services/api/image.ts',import.meta.url),'utf8');
+ const fn=source.slice(source.indexOf('export async function normalizeCanvasImageTask('));
+ const js=ts.transpileModule(fn,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
+ let stored=0;const context={exports:{},persistCanvasInlineImage:async data=>{stored++;assert.equal(data,'data:image/png;base64,aGVsbG8=');return {storageKey:'local-ref:original',content:'local-ref:original',localMedia:{sha256:'hash'}}}};
+ vm.runInNewContext(js,context);
+ const task={id:'t',status:'completed',image_url:'data:image/png;base64,aGVsbG8=',image_urls:['data:image/png;base64,aGVsbG8=']};
+ const next=await context.exports.normalizeCanvasImageTask(task);
+ assert.equal(stored,1);assert.equal(next.image_url,'local-ref:original');assert.equal(next.image_urls[0],next.image_url);
+ assert.equal(next.media[next.image_url].localMedia.sha256,'hash');assert.equal(JSON.stringify(next).includes('base64'),false);
+ assert.equal(task.image_url.startsWith('data:'),true);
+});

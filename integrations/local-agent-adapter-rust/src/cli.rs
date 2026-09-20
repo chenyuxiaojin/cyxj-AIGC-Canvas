@@ -107,6 +107,8 @@ pub struct ProjectsArgs {
 pub enum ProjectsCommand {
     List,
     Get { project_id: String },
+    Status { project_id: String },
+    Node { project_id: String, node_id: String },
     Create(InputFile),
     Action { project_id: String, #[arg(long)] file: PathBuf },
 }
@@ -302,6 +304,8 @@ fn execute_bridge(
         Command::Capabilities => client.get("/v1/capabilities"),
         Command::Projects(args) => match args.command {
             ProjectsCommand::List => client.get("/v1/projects"),
+            ProjectsCommand::Status { project_id } => { validate_route_identifier(&project_id)?; client.post(&format!("/v1/projects/{project_id}/actions"), &json!({"action":"status"})) },
+            ProjectsCommand::Node { project_id, node_id } => { validate_route_identifier(&project_id)?; client.post(&format!("/v1/projects/{project_id}/actions"), &json!({"action":"node","node_id":node_id})) },
             ProjectsCommand::Get { project_id } => {
                 validate_route_identifier(&project_id)?;
                 client.get(&format!("/v1/projects/{project_id}"))

@@ -2,7 +2,7 @@ import { saveAs } from "file-saver";
 
 import { createZip } from "@/lib/zip";
 import { readCanvasMediaBlob } from "@/services/canvas-media";
-import { isDesktopRuntime, saveCanvasExport } from "@/services/desktop-runtime";
+import { isDesktopRuntime, loadDesktopCanvasProject, saveCanvasExport } from "@/services/desktop-runtime";
 import type { CanvasExportAsset, CanvasExportFile } from "../export-types";
 import type { CanvasProject } from "../stores/use-canvas-store";
 
@@ -15,7 +15,8 @@ export async function exportCanvasProjects(projects: CanvasProject[], fileName =
 export async function createCanvasArchive(projects: CanvasProject[]) {
     const zipFiles: { name: string; data: BlobPart }[] = [];
     const exportedProjects = [];
-    for (const project of projects) {
+    for (const item of projects) {
+        const project = item.__desktopSummary ? await loadDesktopCanvasProject<CanvasProject>(item.id) : item;
         const files: CanvasExportAsset[] = [];
         // Read sequentially: real 4K images must not create dozens of concurrent IPC reads.
         for (const storageKey of collectStorageKeys(project)) {

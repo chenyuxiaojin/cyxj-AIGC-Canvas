@@ -122,7 +122,8 @@ fn tool_catalog() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "node_ids": { "type": "array", "items": { "type": "string" }, "maxItems": 100 },
-                    "include_connections": { "type": "boolean", "default": true }
+                    "include_connections": { "type": "boolean", "default": true },
+                    "summary": { "type": "boolean", "default": false, "description": "Use true when polling revision and node/task status; omits content and undo history." }
                 },
                 "additionalProperties": false
             },
@@ -248,6 +249,7 @@ fn canvas_context(
     project_id: &str,
     arguments: &Value,
 ) -> Result<Value, BridgeError> {
+    if arguments["summary"].as_bool() == Some(true) { return client.post(&format!("/v1/projects/{project_id}/actions"), &json!({"action":"status"})); }
     let data = project_data(client, project_id)?;
     let project = data.get("project").cloned().unwrap_or_else(|| json!({}));
     let nodes = project

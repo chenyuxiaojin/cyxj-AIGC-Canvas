@@ -43,7 +43,7 @@ pub(crate) fn read_registered_media(canvas: &SqliteCanvasAdapter, app_data: &Pat
     if !key.starts_with("local-ref:") || key.len() > 256 { return Err("素材引用无效".into()); }
     let project = canvas.get_project(project_id).map_err(|error| error.to_string())?;
     let mut found = None;
-    find_reference(&project.project["nodes"], key, &mut found)?;
+    find_reference(&project.project, key, &mut found)?;
     let reference = found.ok_or("当前画布及其历史版本未登记此素材")?;
     if reference.storage_key != key || key != format!("local-ref:{}", reference.asset_id) || reference.bytes == 0 || reference.bytes > MAX_MEDIA_BYTES
         || reference.sha256.len() != 64 || !reference.sha256.bytes().all(|b| b.is_ascii_hexdigit())

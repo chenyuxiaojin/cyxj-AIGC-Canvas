@@ -54,7 +54,7 @@ export function CanvasProjectCard({ project }: { project: CanvasProject }) {
                         <h2 className="truncate text-xl font-semibold">{project.title}</h2>
                         <CanvasBindingLabel projectId={project.id} />
                         <p className="mt-3 text-sm leading-6 text-stone-600 dark:text-stone-400">
-                            {project.nodes.length} 个节点 · {project.connections.length} 条连线
+                            {project.__desktopSummary ? project.nodeCount : project.nodes.length} 个节点 · {project.__desktopSummary ? project.connectionCount : project.connections.length} 条连线
                         </p>
                     </button>
                 )}

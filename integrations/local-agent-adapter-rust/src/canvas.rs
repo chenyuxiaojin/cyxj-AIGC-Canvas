@@ -376,6 +376,16 @@ impl SqliteCanvasAdapter {
     }
 
 
+    pub fn project_summaries(&self) -> Result<Vec<Value>, BridgeError> {
+        let db = self.connect()?;
+        let mut statement = db.prepare("SELECT id,json_extract(project_data,'$.title'),created_at,updated_at,json_array_length(project_data,'$.nodes'),json_array_length(project_data,'$.connections') FROM canvas_projects WHERE user_id=?1 AND deleted_at='' ORDER BY updated_at DESC")?;
+        let rows = statement.query_map([DESKTOP_LOCAL_USER_ID], |row| Ok(json!({
+            "id":row.get::<_,String>(0)?,"title":row.get::<_,String>(1)?,"createdAt":row.get::<_,String>(2)?,"updatedAt":row.get::<_,String>(3)?,
+            "nodes":[],"connections":[],"__desktopSummary":true,"nodeCount":row.get::<_,i64>(4)?,"connectionCount":row.get::<_,i64>(5)?
+        })))?;
+        Ok(rows.collect::<Result<Vec<_>,_>>()?)
+    }
+
     pub fn database_path(&self) -> &Path {
         &self.database_path
     }
@@ -413,7 +423,8 @@ impl SqliteCanvasAdapter {
     }
 
     // Return the exact committed document; a second SELECT could observe another writer.
-    pub fn save_human_document_checked(&self, project: Value, expected_revision: Option<&str>) -> Result<ProjectDocument, BridgeError> {
+    pub fn save_human_document_checked(&self, mut project: Value, expected_revision: Option<&str>) -> Result<ProjectDocument, BridgeError> {
+        crate::inline_media::normalize(self.database_path.parent().unwrap(), &mut project)?;
         let metadata = project_metadata(&project)?;
         let raw = serde_json::to_string(&project)
             .map_err(|_| BridgeError::invalid("The canvas project could not be encoded."))?;
@@ -652,6 +663,7 @@ impl CanvasOperationAdapter for SqliteCanvasAdapter {
             batch["baseRevision"] = json!(operation_revision);
         }
         let now = now_rfc3339()?;
+        crate::inline_media::normalize_with_persistence(self.database_path.parent().unwrap(), &mut batch, !dry_run)?;
         let outcome = self.protocol()?.apply(project, batch, &now)?;
 
         if dry_run {
@@ -748,6 +760,18 @@ impl CanvasOperationAdapter for SqliteCanvasAdapter {
                 self.save_human_project_checked(project,Some(""))?;
                 Ok(json!(self.get_project(id)?))
             }
+            "status" => {
+                let document = self.get_project(id)?;
+                let project = &document.project;
+                Ok(json!({"id":id,"revision":document.revision,"operationRevision":project["operationState"]["revision"],"updatedAt":project["updatedAt"],
+                    "nodes":project["nodes"].as_array().map(|nodes| nodes.iter().map(|node| json!({"id":node["id"],"type":node["type"],"title":node["title"],"status":node["metadata"]["status"],"storageKey":node["metadata"]["storageKey"]})).collect::<Vec<_>>()),
+                    "connectionCount":project["connections"].as_array().map(Vec::len)}))
+            }
+            "node" => {
+                let document = self.get_project(id)?;
+                let node = document.project["nodes"].as_array().and_then(|nodes| nodes.iter().find(|node| node["id"] == request["node_id"])).cloned().ok_or_else(||BridgeError::not_found("节点不存在"))?;
+                Ok(json!({"revision":document.revision,"node":node}))
+            }
             "history" => self.history_list(id),
             "preview" => self.history_preview(id, request["sequence"].as_i64().ok_or_else(||BridgeError::invalid("缺少历史版本编号。"))?),
             "restore" => self.history_restore(id, request["sequence"].as_i64().ok_or_else(||BridgeError::invalid("缺少历史版本编号。"))?,request["base_revision"].as_str().ok_or_else(||BridgeError::invalid("缺少 base_revision。"))?,request["request_id"].as_str().ok_or_else(||BridgeError::invalid("缺少 request_id。"))?),
@@ -755,36 +779,16 @@ impl CanvasOperationAdapter for SqliteCanvasAdapter {
         }
     }
     fn list_projects(&self) -> Result<Vec<ProjectSummary>, BridgeError> {
+        #[derive(Deserialize)]
+        struct Title { #[serde(default)] title: String }
         let connection = self.connect()?;
-        let mut statement = connection.prepare(
-            "SELECT id, project_data, updated_at FROM canvas_projects
-             WHERE user_id = ?1 AND deleted_at = ''
-             ORDER BY updated_at DESC",
-        )?;
-        let rows = statement.query_map([DESKTOP_LOCAL_USER_ID], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?;
+        let mut statement = connection.prepare("SELECT id, project_data, updated_at FROM canvas_projects WHERE user_id=?1 AND deleted_at='' ORDER BY updated_at DESC")?;
+        let rows = statement.query_map([DESKTOP_LOCAL_USER_ID], |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?)))?;
         rows.map(|row| {
             let (id, raw, updated_at) = row?;
-            let project: Value = serde_json::from_str(&raw).map_err(|_| {
-                BridgeError::internal("A desktop canvas project contains invalid JSON.")
-            })?;
-            Ok(ProjectSummary {
-                id,
-                title: project
-                    .get("title")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Untitled canvas")
-                    .to_owned(),
-                updated_at,
-                revision: revision(raw.as_bytes()),
-            })
-        })
-        .collect()
+            let title: Title = serde_json::from_str(&raw).map_err(|_| BridgeError::internal("画布 JSON 无效"))?;
+            Ok(ProjectSummary { id, title: title.title, updated_at, revision: revision(raw.as_bytes()) })
+        }).collect()
     }
 
     fn get_project(&self, project_id: &str) -> Result<ProjectDocument, BridgeError> {
@@ -865,10 +869,12 @@ impl CanvasOperationAdapter for SqliteCanvasAdapter {
             let now = now_rfc3339()?;
             let mut batch = canonical_batch(&request, &now)?;
             batch["baseRevision"] = json!(project_revision(&project)?);
+            crate::inline_media::normalize_with_persistence(self.database_path.parent().unwrap(), &mut batch, !dry_run)?;
             let outcome = protocol.apply(project, batch, &now)?;
             if !outcome.ok { return Err(protocol_error(&outcome)); }
             outcome.project
         } else { apply_to_project(project, &request.operations)? };
+        crate::inline_media::normalize_with_persistence(self.database_path.parent().unwrap(), &mut proposed, !dry_run)?;
         if !dry_run {
             proposed["updatedAt"] = Value::String(now_rfc3339()?);
         }

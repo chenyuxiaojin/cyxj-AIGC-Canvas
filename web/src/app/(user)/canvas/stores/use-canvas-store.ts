@@ -32,6 +32,9 @@ export const DEFAULT_CANVAS_SIDE_PANEL: CanvasSidePanelState = { open: true, wid
 export const DEFAULT_CANVAS_AGENT_PANEL: CanvasSidePanelState = { open: false, width: 390 };
 
 export type CanvasProject = {
+    __desktopSummary?: boolean;
+    nodeCount?: number;
+    connectionCount?: number;
     __desktopRevision?: string;
     recoveryCopyOf?: string;
     quarantinedConnections?: Array<{ connection: CanvasConnection; reason: string }>;
@@ -93,7 +96,7 @@ const CANVAS_STORE_INDEX_KEY = "infinite-canvas:canvas_store:index";
 const CANVAS_PROJECT_PREFIX = "infinite-canvas:canvas_project:";
 const UI_ONLY_PROJECT_KEYS = new Set(["viewport", "sidePanel", "agentPanel"]);
 type PersistedCanvasState = Pick<CanvasStore, "projects">;
-type CanvasStoreIndex = { version: 1; ids: string[] };
+type CanvasStoreIndex = { version: 1; ids: string[]; summaries?: CanvasProject[] };
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let queuedPersistState: PersistedCanvasState | null = null;
 let accountCanvasSyncEnabled = false;
@@ -129,7 +132,16 @@ function statusForError(id: string, error: unknown) {
 function sameContent(left: CanvasProject, right: CanvasProject) {
     const { __desktopRevision: _left, ...a } = left;
     const { __desktopRevision: _right, ...b } = right;
-    return equal(JSON.parse(JSON.stringify(a)), JSON.parse(JSON.stringify(b)));
+    return sameJsonValue(a, b);
+}
+// JSON transport omits undefined object fields; compare that meaning without copies.
+function sameJsonValue(a: unknown, b: unknown): boolean {
+    if (a === b) return true;
+    if (a === null || b === null || typeof a !== "object" || typeof b !== "object") return false;
+    if (Array.isArray(a) || Array.isArray(b)) return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((value, i) => sameJsonValue(value ?? null, b[i] ?? null));
+    const left = a as Record<string, unknown>, right = b as Record<string, unknown>;
+    const keys = Object.keys(left).filter(key => left[key] !== undefined);
+    return keys.length === Object.keys(right).filter(key => right[key] !== undefined).length && keys.every(key => sameJsonValue(left[key], right[key]));
 }
 function draftToken(id: string) { return `${sessionId}:${draftVersions.get(id) || 0}`; }
 function journalTask(id: string, action: () => Promise<void>) {
@@ -137,17 +149,22 @@ function journalTask(id: string, action: () => Promise<void>) {
     journalChains.set(id, next);
     return next;
 }
-function checkpointPending(id: string) {
-    return journalTask(id, async () => {
-        const project = pendingProjects.get(id);
-        if (project) {
-            await localForageStorage.setItem(JOURNAL_PREFIX + id, JSON.stringify({ project, status: useCanvasStore.getState().saveStatus[id] }));
-        } else {
-            // Cache has already been persisted before acknowledging/removing a draft.
-            await localForageStorage.removeItem(JOURNAL_PREFIX + id);
+const checkpoints = new Map<string, Promise<void>>();
+const checkpointAgain = new Set<string>();
+function checkpointPending(id: string): Promise<void> {
+    checkpointAgain.add(id);
+    const existing = checkpoints.get(id);
+    if (existing) return existing;
+    const task = journalTask(id, async () => {
+        while (checkpointAgain.delete(id)) {
+            const project = pendingProjects.get(id);
+            if (project) await localForageStorage.setItem(JOURNAL_PREFIX + id, JSON.stringify({ project, status: useCanvasStore.getState().saveStatus[id] }));
+            else await localForageStorage.removeItem(JOURNAL_PREFIX + id);
+            await localForageStorage.removeItem(RECOVERY_PREFIX + id);
         }
-        await localForageStorage.removeItem(RECOVERY_PREFIX + id);
-    });
+    }).finally(() => { checkpoints.delete(id); });
+    checkpoints.set(id, task);
+    return task;
 }
 async function loadRecoveryProjects() {
     const raw = await localForageStorage.getItem(RECOVERY_INDEX);
@@ -226,8 +243,8 @@ function queueProjectSave(project: CanvasProject) {
         void flushProject(project.id).catch(() => undefined);
     }, 400));
 }
-async function readDesktopProjects(_localProjects: CanvasProject[]) {
-    const [loaded, deletedIds] = await Promise.all([loadDesktopCanvasProjects<CanvasProject>(), loadDesktopCanvasDeletedIds()]);
+async function readDesktopProjects(_localProjects: CanvasProject[], projectId?: string) {
+    const [loaded, deletedIds] = await Promise.all([loadDesktopCanvasProjects<CanvasProject>(_localProjects, [...pendingProjects.keys(), ...(projectId ? [projectId] : [])]), loadDesktopCanvasDeletedIds()]);
     const desktopProjects = loaded.projects;
     deletedDesktopIds.clear();
     deletedIds.forEach((id) => deletedDesktopIds.add(id));
@@ -239,7 +256,7 @@ async function readDesktopProjects(_localProjects: CanvasProject[]) {
         const id = project.id;
         if (restoringProjects.has(id)) continue;
         if (deletedDesktopIds.has(id)) {
-            await localForageStorage.setItem("infinite-canvas:recovery:deleted:" + id, JSON.stringify(pendingProjects.get(id) || project));
+            await localForageStorage.setItem("infinite-canvas:recovery:deleted:" + id, JSON.stringify(pendingProjects.get(id) || (project.__desktopSummary ? JSON.parse(await localForageStorage.getItem(CANVAS_PROJECT_PREFIX + id) || "null") : project)));
             cancelProjectSaves([id]);
             if (pendingProjects.has(id)) statusForError(id, new CanvasPersistenceError("PROJECT_DELETED", "画布已删除，编辑已保留，可另存副本。"));
         } else if (!desktopIds.has(id) && !failedIds.has(id) && !pendingProjects.has(id)) {
@@ -336,6 +353,7 @@ async function loadLocalProjects(): Promise<CanvasProject[]> {
     if (indexValue) {
         const index = JSON.parse(indexValue) as CanvasStoreIndex;
         if (index?.version === 1 && Array.isArray(index.ids)) {
+            if (isDesktopRuntime() && index.summaries) { canvasShardsReady = true; return index.summaries; }
             const projects = (
                 await Promise.all(
                     index.ids.map(async (id) => {
@@ -345,7 +363,7 @@ async function loadLocalProjects(): Promise<CanvasProject[]> {
                 )
             ).filter((project): project is CanvasProject => Boolean(project));
             canvasShardsReady = true;
-            return projects;
+            return isDesktopRuntime() ? projects.map(projectSummary) : projects;
         }
     }
     canvasShardsReady = false;
@@ -355,13 +373,24 @@ async function loadLocalProjects(): Promise<CanvasProject[]> {
     return (parsed.state as PersistedCanvasState)?.projects || [];
 }
 
+let requestedLocalProjects: CanvasProject[] | null = null;
+let localDrain: Promise<void> | null = null;
 function persistLocalProjects(projects: CanvasProject[]) {
-    localPersistChain = localPersistChain.catch(() => undefined).then(() => writeLocalProjects(projects));
-    return localPersistChain;
+    requestedLocalProjects = projects;
+    if (localDrain) return localDrain;
+    localPersistChain = localPersistChain.catch(() => undefined).then(async () => {
+        while (requestedLocalProjects) {
+            const latest = requestedLocalProjects;
+            requestedLocalProjects = null;
+            await writeLocalProjects(latest);
+        }
+    });
+    localDrain = localPersistChain.finally(() => { localDrain = null; });
+    return localDrain;
 }
 
 async function writeLocalProjects(projects: CanvasProject[]) {
-    const dirty = canvasShardsReady ? projects.filter(projectNeedsWrite) : projects;
+    const dirty = (canvasShardsReady ? projects.filter(projectNeedsWrite) : projects).filter(project => !project.__desktopSummary);
     const nextIds = new Set(projects.map((project) => project.id));
     const removedIds = Array.from(lastWrittenProjects.keys()).filter((id) => !nextIds.has(id));
     const results = await Promise.allSettled(dirty.map(async (project) => {
@@ -373,7 +402,7 @@ async function writeLocalProjects(projects: CanvasProject[]) {
         if (result.status === "rejected") statusForError(dirty[index].id, result.reason);
     });
     try {
-        await localForageStorage.setItem(CANVAS_STORE_INDEX_KEY, JSON.stringify({ version: 1, ids: projects.map((project) => project.id) } satisfies CanvasStoreIndex));
+        await localForageStorage.setItem(CANVAS_STORE_INDEX_KEY, JSON.stringify({ version: 1, ids: projects.map((project) => project.id), summaries: projects.map(projectSummary) } satisfies CanvasStoreIndex));
     } catch (error) {
         for (const project of dirty) if (useCanvasStore.getState().saveStatus[project.id]?.state !== "conflict") statusForError(project.id, error);
         throw error;
@@ -591,7 +620,7 @@ function persistLocalProject(id: string): Promise<void> {
         if (!project) return;
         validateCanvasGraph(project);
         await localForageStorage.setItem(CANVAS_PROJECT_PREFIX + id, JSON.stringify(project));
-        await localForageStorage.setItem(CANVAS_STORE_INDEX_KEY, JSON.stringify({ version: 1, ids: useCanvasStore.getState().projects.map((item) => item.id) }));
+        await localForageStorage.setItem(CANVAS_STORE_INDEX_KEY, JSON.stringify({ version: 1, ids: useCanvasStore.getState().projects.map((item) => item.id), summaries: useCanvasStore.getState().projects.map(projectSummary) }));
         lastWrittenProjects.set(id, project);
     });
     return localPersistChain;
@@ -707,6 +736,10 @@ export const useCanvasStore = create<CanvasStore>()(
             },
             openProject: (id) => get().projects.find((item) => item.id === id) || null,
             renameProject: (id, title) => {
+                if (get().openProject(id)?.__desktopSummary) {
+                    void get().refreshFromDesktop(id).then(() => { if (!get().openProject(id)?.__desktopSummary) get().renameProject(id, title); }).catch(error => statusForError(id, error));
+                    return;
+                }
                 const sourceProject = get().projects.find((item) => item.id === id);
                 if (!sourceProject) return;
                 const project = migrateCanvasProject(sourceProject);
@@ -771,7 +804,7 @@ export const useCanvasStore = create<CanvasStore>()(
                 }
                 const { nodes: _nodes, connections: _connections, ...projectPatch } = patch;
                 const projectPatchChanged = Object.entries(projectPatch).some(
-                    ([key, value]) => JSON.stringify(project[key as keyof CanvasProject]) !== JSON.stringify(value),
+                    ([key, value]) => !sameJsonValue(project[key as keyof CanvasProject], value),
                 );
                 if (!operations.length && !projectPatchChanged) return;
                 nextProject = {
@@ -821,9 +854,9 @@ export const useCanvasStore = create<CanvasStore>()(
             setSyncEnabled: (enabled) => {
                 accountCanvasSyncEnabled = enabled;
             },
-            refreshFromDesktop: async () => {
+            refreshFromDesktop: async (projectId) => {
                 if (!isDesktopRuntime()) return;
-                const projects = await readDesktopProjects(get().projects);
+                const projects = await readDesktopProjects(get().projects, projectId);
                 queuedPersistState = { projects };
                 set({ projects });
                 await persistLocalProjects(projects).catch(() => undefined);
@@ -900,4 +933,10 @@ function mergeDesktopCanvasProjects(
     return Array.from(projects.values()).sort(
         (a, b) => Date.parse(b.updatedAt || "") - Date.parse(a.updatedAt || ""),
     );
+}
+
+function projectSummary(project: CanvasProject): CanvasProject {
+    const { id, title, createdAt, updatedAt, viewport, sidePanel, agentPanel } = project;
+    return { id, title, createdAt, updatedAt, viewport, sidePanel, agentPanel, nodes: [], connections: [], chatSessions: [], __desktopSummary: true,
+        nodeCount: project.__desktopSummary ? project.nodeCount : project.nodes.length, connectionCount: project.__desktopSummary ? project.connectionCount : project.connections.length } as unknown as CanvasProject;
 }

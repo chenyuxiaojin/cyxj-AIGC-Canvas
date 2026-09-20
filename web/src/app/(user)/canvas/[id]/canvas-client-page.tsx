@@ -220,7 +220,7 @@ export default function CanvasPage() {
         setMounted(false);
         let active = true;
         const prepare = async () => {
-            if (isDesktopRuntime()) await refreshFromDesktop().catch(() => undefined);
+            if (isDesktopRuntime()) await refreshFromDesktop(params.id).catch(() => undefined);
             if (active) setMounted(true);
         };
         void prepare();
@@ -6576,6 +6576,7 @@ function applyCanvasImageTaskUpdate(nodes: CanvasNodeData[], nodeId: string, tas
                 mimeType: task.mimeType || "image/png",
                 progress: 100,
                 imageTaskResultId: task.id,
+                ...task.media?.[url],
                 panoramaProjection: isPanorama ? ("equirectangular" as const) : undefined,
             },
         };
@@ -6602,6 +6603,7 @@ function applyCanvasImageTaskUpdate(nodes: CanvasNodeData[], nodeId: string, tas
                 bytes: 0,
                 imageTaskId: undefined,
                 imageTaskResultId: task.id,
+                ...task.media?.[url],
                 isBatchRoot: undefined,
                 batchChildIds: undefined,
                 primaryImageId: undefined,

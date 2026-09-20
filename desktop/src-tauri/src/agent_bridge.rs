@@ -198,3 +198,13 @@ pub(crate) fn desktop_write_canvas_transfer(bridge:State<'_,DesktopAgentBridge>,
     let bytes=match request.body() { tauri::ipc::InvokeBody::Raw(bytes)=>bytes, _=>return Err("素材传输需要二进制内容。".into()) };
     bridge.canvas.write_transfer(project,bytes).map_err(|e|e.to_string())
 }
+
+#[tauri::command]
+pub(crate) fn desktop_store_inline_media(bridge: State<'_, DesktopAgentBridge>, data: String) -> Result<Value, String> {
+    local_agent_adapter::inline_media::store(bridge.canvas.database_path().parent().ok_or("缺少素材目录")?, &data).map_err(|e|e.to_string())
+}
+
+#[tauri::command]
+pub(crate) fn desktop_canvas_summaries(bridge: State<'_, DesktopAgentBridge>) -> Result<Vec<Value>, String> {
+    bridge.canvas.project_summaries().map_err(|e|e.to_string())
+}

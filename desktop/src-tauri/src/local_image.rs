@@ -108,7 +108,7 @@ fn registered_image(
         if image.storage_key != key
             || image.asset_id.is_empty()
             || key != format!("local-ref:{}", image.asset_id)
-            || image.root_id != "agent-media"
+            || !matches!(image.root_id.as_str(), "agent-media" | "project-media")
             || image.bytes == 0
             || image.bytes > MAX_IMAGE_BYTES
             || image.sha256.len() != 64
@@ -186,6 +186,12 @@ fn read_registered_image(
         .get_project(project_id)
         .map_err(|error| error.to_string())?;
     let image = registered_image(&project.project, project_id, key)?;
+    if image.root_id == "project-media" {
+        let app_data = media_root.parent().ok_or("无法定位本机素材目录")?;
+        let bytes = crate::canvas_media::read_registered_media(canvas, app_data, project_id, key)?;
+        if image_mime(&bytes) != Some(image.mime_type.as_str()) { return Err("图片真实格式与登记不符".to_owned()); }
+        return Ok(bytes);
+    }
     exact_bound_directory(workflow_root, project_id)?;
     let root_id = RootId::new("agent-media").map_err(|error| error.to_string())?;
     let root =
@@ -306,6 +312,21 @@ mod tests {
     const PROJECT_ID: &str = "film-a";
     const KEY: &str = "local-ref:asset-a";
     const PNG: &[u8] = include_bytes!("../icons/icon.png");
+
+    #[test]
+    fn managed_inline_image_reads_original_without_a_film_binding() {
+        use base64::Engine;
+        let fixture = Fixture::new();
+        let root = fixture.media.parent().unwrap();
+        let data = format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(PNG));
+        let reference = local_agent_adapter::inline_media::store(root, &data).unwrap();
+        let mut project = fixture.project.clone();
+        project["nodes"][0]["metadata"] = json!({"content":reference["storageKey"],"storageKey":reference["storageKey"],"localMedia":reference});
+        fixture.canvas.save_human_project(project).unwrap();
+        fs::write(root.join("local-media-roots.json"),serde_json::to_vec(&json!({"roots":{"project-media":root.join("project-media")}})).unwrap()).unwrap();
+        fs::remove_dir_all(&fixture.workflow).unwrap();
+        assert_eq!(read_registered_image(&fixture.canvas,&fixture.workflow,&fixture.media,PROJECT_ID,reference["storageKey"].as_str().unwrap()).unwrap(),PNG);
+    }
 
     struct Fixture {
         temp: TempDir,
