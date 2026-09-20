@@ -11,10 +11,14 @@ const sync=source.slice(syncStart,source.indexOf('\n    const executeRetryNode',
 const effectEnd=source.indexOf('\n    useEffect(() => {\n        if (!projectLoaded) return;\n        const pollCanvasTasks');
 const effect=source.slice(source.lastIndexOf('    useEffect(() => {',effectEnd-1),effectEnd);
 const code=ts.transpileModule(sync+'\n'+effect+'\nexports.sync=syncCanvasDocument;', {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
+const protocol=readFileSync(new URL('../../web/src/app/(user)/canvas/protocol/canvas-operation-protocol.ts',import.meta.url),'utf8');
+const protocolCode=ts.transpileModule(protocol, {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
+const protocolModule={exports:{}};vm.runInNewContext(protocolCode,protocolModule);
+const equal=createRequire(new URL('../../web/package.json',import.meta.url))('fast-deep-equal');
 function harness() {
  let project={id:'fixture',nodes:[{id:'old'}],connections:[]};let commit,fail,autosave;
  const cache=new Promise((resolve,reject)=>{commit=resolve;fail=reject});const writes=[];
- const context={exports:{},projectId:'fixture',projectLoaded:true,useCallback:fn=>fn,useEffect:fn=>{autosave=fn},equal:(a,b)=>JSON.stringify(a)===JSON.stringify(b),
+ const context={exports:{},buildCanvasStructureOperations:protocolModule.exports.buildCanvasStructureOperations,projectId:'fixture',projectLoaded:true,useCallback:fn=>fn,useEffect:fn=>{autosave=fn},equal,
   useCanvasStore:{getState:()=>({projects:[project]})},updateProject:(_,patch)=>writes.push(patch),
   nodes:project.nodes,connections:project.connections,chatSessions:[],activeChatId:null,agentConfig:null,backgroundMode:'lines',showImageInfo:false,
   nodesRef:{current:project.nodes},connectionsRef:{current:project.connections},historyPausedRef:{current:false},historyRef:{current:{past:[],future:[]}},externalSnapshotRef:{current:null},viewportRef:{current:{}},lastHistoryRef:{current:null},
@@ -37,4 +41,33 @@ test('cache failure cannot write the old editor nodes over an accepted remote re
 test('unpersisted editor changes reject remote sync before changing the store',async()=>{
  const h=harness();h.context.nodesRef.current=[{id:'unsaved'}];
  await assert.rejects(h.run(),/尚未保存/);assert.equal(h.context.currentProject.nodes[0].id,'old');
+});
+
+test('temporary video preview URLs do not block a saved external document or the next command',async()=>{
+ const h=harness();
+ const stored={id:'video',metadata:{content:'generated-video:fixture',storageKey:'generated-video:fixture'}};
+ h.context.currentProject.nodes=[stored];h.context.nodesRef.current=[{...stored,metadata:{...stored.metadata,content:'blob:mounted-preview'}}];
+ const saving=h.run();h.commit();await saving;assert.equal(h.writes.length,0);
+});
+test('real edits beside a preview URL still reject remote sync',async()=>{
+ const h=harness();
+ const stored={id:'video',title:'saved',metadata:{content:'generated-video:fixture',storageKey:'generated-video:fixture'}};
+ h.context.currentProject.nodes=[stored];h.context.nodesRef.current=[{...stored,title:'unsaved edit',metadata:{...stored.metadata,content:'blob:mounted-preview'}}];
+ await assert.rejects(h.run(),/尚未保存/);assert.equal(h.context.currentProject.nodes[0].title,'saved');
+});
+
+test('cleared generation fields omitted by persistence do not block external sync',async()=>{
+ const h=harness();
+ const stored={id:'video',metadata:{content:'generated-video:fixture',storageKey:'generated-video:fixture',status:'success',references:[{id:'source',storageKey:'local-ref:asset-fixture'}]}};
+ h.context.currentProject.nodes=[stored];
+ h.context.nodesRef.current=[{...stored,metadata:{...stored.metadata,content:'blob:preview',errorDetails:undefined,videoProgress:undefined,references:[{...stored.metadata.references[0],url:undefined}]}}];
+ assert.equal(equal(h.context.currentProject.nodes,h.context.nodesRef.current),false);
+ const saving=h.run();h.commit();await saving;assert.equal(h.writes.length,0);
+});
+test('reference changes beside cleared fields still block external sync',async()=>{
+ const h=harness();
+ const stored={id:'video',metadata:{status:'success',references:[{id:'source',storageKey:'local-ref:asset-fixture'}]}};
+ h.context.currentProject.nodes=[stored];
+ h.context.nodesRef.current=[{...stored,metadata:{...stored.metadata,errorDetails:undefined,references:[{id:'different',storageKey:'local-ref:different'}]}}];
+ await assert.rejects(h.run(),/尚未保存/);
 });

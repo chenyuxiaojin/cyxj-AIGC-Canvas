@@ -258,7 +258,12 @@ export function leaseStoredMediaBlob(storageKey: string, blob: Blob) {
     return objectUrls.acquire(storageKey, blob);
 }
 
-export async function readMediaOriginal(storageKey?: string, fallback = "") {
+export async function readMediaOriginal(storageKey?: string, fallback = "", projectId?: string, mimeType?: string) {
+    const localKey = [storageKey, fallback].find((value) => value?.startsWith("local-ref:"));
+    if (localKey) {
+        const { readCanvasMediaBlob } = await import("@/services/canvas-media");
+        return readCanvasMediaBlob(projectId || "", localKey, mimeType);
+    }
     const original = storageKey ? await getMediaBlob(storageKey) : null;
     if (original) return original;
     const url = await resolveMediaRemoteUrl(storageKey, fallback);

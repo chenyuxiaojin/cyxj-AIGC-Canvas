@@ -18,7 +18,7 @@ export type LocalModelChannel = {
 };
 
 export type VideoMultiPromptItem = { prompt: string; duration: string };
-export type VideoElementReference = { id: string; kind: "image" | "video" | "audio"; name: string; type: string; dataUrl?: string; url?: string; storageKey?: string; bytes?: number; width?: number; height?: number; durationMs?: number };
+export type VideoElementReference = { id: string; kind: "image" | "video" | "audio"; name: string; type: string; dataUrl?: string; url?: string; storageKey?: string; projectId?: string; bytes?: number; width?: number; height?: number; durationMs?: number };
 export type VideoElementItem = { name: string; description: string; references: VideoElementReference[] };
 
 export type AiConfig = {

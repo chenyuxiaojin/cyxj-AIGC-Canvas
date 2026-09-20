@@ -746,10 +746,11 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
             timer = 0;
         };
         const onVisibility = () => {
-            if (document.hidden) stop();
+            if (document.hidden && !desktopRuntime) stop();
             else start();
         };
-        if (!document.hidden) start();
+        // CLI jobs must finish and save their receipt while the desktop window is in the background.
+        if (desktopRuntime || !document.hidden) start();
         document.addEventListener("visibilitychange", onVisibility);
         return () => {
             stop();
@@ -2864,7 +2865,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         setUpscaleNodeId(null);
         const hideLoading = message.loading("正在放大图片...", 0);
         try {
-            const upscaled = await upscaleDataUrl(node.metadata.content, params);
+            const upscaled = await upscaleDataUrl(await imageToDataUrl({ dataUrl: node.metadata.content, storageKey: node.metadata.storageKey, projectId, type: node.metadata.mimeType }), params);
             const image = await uploadImage(upscaled);
             const size = fitNodeSize(image.width, image.height);
             const childId = nanoid();
@@ -2889,7 +2890,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         } finally {
             hideLoading();
         }
-    }, [message]);
+    }, [message, projectId, uploadImage]);
 
     const executeGenerateAngleNode = useCallback(
         async (node: CanvasNodeData, params: CanvasImageAngleParams, commandId?: string, beforeSubmit?: () => Promise<void>) => {
@@ -2903,7 +2904,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
             const imageConfig = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
             const title = buildAngleLabel(params);
             const prompt = buildAnglePrompt(params);
-            const referenceImages = [{ id: node.id, name: `image-${node.id}.png`, type: node.metadata.mimeType || "image/png", dataUrl: node.metadata.content, storageKey: node.metadata.storageKey }];
+            const referenceImages = [{ id: node.id, name: `image-${node.id}.png`, type: node.metadata.mimeType || "image/png", dataUrl: node.metadata.content, storageKey: node.metadata.storageKey, projectId }];
             const generationMetadata = buildImageGenerationMetadata("edit", generationConfig, 1, referenceImages);
             const clientTaskId = `client_image_task_${childId}`;
             const startedAt = Date.now();
@@ -3275,6 +3276,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
             const editingTextNode = mode === "text" && Boolean(sourceTextContent);
             const generationContext = await hydrateNodeGenerationContext(
                 buildNodeGenerationContext(nodeId, nodesRef.current, connectionsRef.current, editingTextNode ? `请根据要求修改以下文本。\n\n原文：\n${sourceTextContent}\n\n修改要求：\n${prompt}` : prompt),
+                projectId,
             );
             const effectivePrompt = generationContext.prompt.trim();
             const requestPrompt = mode === "video" || (mode === "image" && !isPanoramaNodeType(sourceNode?.type)) ? applyCameraPrompt(effectivePrompt, sourceNode?.metadata?.cameraControl) : effectivePrompt;
@@ -3295,7 +3297,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 if (mode === "image" && isPanoramaNodeType(sourceNode?.type)) {
                     const panoramaSourcePrompt = prompt.trim();
                     const sourceReference: ReferenceImage[] = sourceNode?.metadata?.content
-                        ? [{ id: sourceNode.id, name: `image-${sourceNode.id}.png`, type: sourceNode.metadata.mimeType || "image/png", dataUrl: sourceNode.metadata.content, storageKey: sourceNode.metadata.storageKey }]
+                        ? [{ id: sourceNode.id, name: `image-${sourceNode.id}.png`, type: sourceNode.metadata.mimeType || "image/png", dataUrl: sourceNode.metadata.content, storageKey: sourceNode.metadata.storageKey, projectId }]
                         : [];
                     const referenceImages = [...sourceReference, ...generationContext.referenceImages];
                     const panoramaPrompt = buildPanoramaPrompt(effectivePrompt, referenceImages.length > 0);
@@ -3464,7 +3466,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                     const isEmptyImageNode = isImageNode && !sourceNode?.metadata?.content;
                     const sourceReference =
                         isImageNode && sourceNode?.metadata?.content
-                            ? [{ id: sourceNode.id, name: `image-${sourceNode.id}.png`, type: sourceNode.metadata.mimeType || "image/png", dataUrl: sourceNode.metadata.content, storageKey: sourceNode.metadata.storageKey }]
+                            ? [{ id: sourceNode.id, name: `image-${sourceNode.id}.png`, type: sourceNode.metadata.mimeType || "image/png", dataUrl: sourceNode.metadata.content, storageKey: sourceNode.metadata.storageKey, projectId }]
                             : [];
                     const referenceImages = sourceReference.length ? sourceReference : generationContext.referenceImages;
                     const generationType = referenceImages.length ? ("edit" as const) : ("generation" as const);
@@ -3898,7 +3900,10 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     );
 
     const executeCanvasAgentAction = useCallback(
-        async (action: CanvasAgentAction, messageReferenceNodeIds: string[]): Promise<CanvasAgentToolResult> => {
+        async (action: CanvasAgentAction, messageReferenceNodeIds: string[], commandRevision?: number): Promise<CanvasAgentToolResult> => {
+            // A durable command already passed its own document revision check.
+            // Never borrow an older sidebar conversation's operation revision.
+            let expectedRevision = commandRevision ?? agentExpectedRevisionRef.current;
             const args = action.arguments;
             const stringValue = (key: string) => (typeof args[key] === "string" ? (args[key] as string).trim() : "");
             const stringValues = (key: string) =>
@@ -3925,7 +3930,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                     actor: "agent",
                     requestId: `canvas-agent-${actionId}`,
                     projectId,
-                    baseRevision: agentExpectedRevisionRef.current ?? project.operationState.revision,
+                    baseRevision: expectedRevision ?? project.operationState.revision,
                     timestamp: new Date().toISOString(),
                     operations,
                 });
@@ -3942,7 +3947,8 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 }
                 nodesRef.current = outcome.project.nodes;
                 connectionsRef.current = outcome.project.connections;
-                agentExpectedRevisionRef.current = outcome.project.operationState.revision;
+                expectedRevision = outcome.project.operationState.revision;
+                if (commandRevision === undefined) agentExpectedRevisionRef.current = expectedRevision;
                 setNodes(outcome.project.nodes);
                 setConnections(outcome.project.connections);
                 return { outcome };
@@ -4382,7 +4388,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
         const current = useCanvasStore.getState().projects.find((project) => project.id === projectId);
         if (!current) throw new Error("画布不存在");
-        if (!equal(current.nodes, nodesRef.current) || !equal(current.connections, connectionsRef.current)) {
+        if (buildCanvasStructureOperations(current, nodesRef.current, connectionsRef.current).length > 0) {
             updateProject(projectId, { nodes: nodesRef.current, connections: connectionsRef.current });
         }
         await useCanvasStore.getState().retrySave(projectId);
@@ -4392,7 +4398,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         if (document.project.id !== projectId) throw new Error("画布编号不匹配");
         const project = document.project;
         const local = useCanvasStore.getState().projects.find((item) => item.id === projectId);
-        if (local && (!equal(local.nodes, nodesRef.current) || !equal(local.connections, connectionsRef.current))) throw new Error("画布有尚未保存的编辑，已保留当前内容");
+        if (local && (buildCanvasStructureOperations(local, nodesRef.current, connectionsRef.current).length > 0)) throw new Error("画布有尚未保存的编辑，已保留当前内容");
         // Publish the store and editor snapshot in the same tick. Awaiting the
         // cache first lets the old editor effect overwrite the new revision.
         const persistence = acceptDesktopCanvasDocument(project, document.revision);
@@ -4441,7 +4447,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 throw new Error("请先完成节点的模型配置");
             }
 
-            const context = hasSavedImageMetadata ? null : await hydrateNodeGenerationContext(buildNodeGenerationContext(sourceNode.id, nodesRef.current, connectionsRef.current, sourceNode.metadata?.prompt || node.metadata?.prompt || ""));
+            const context = hasSavedImageMetadata ? null : await hydrateNodeGenerationContext(buildNodeGenerationContext(sourceNode.id, nodesRef.current, connectionsRef.current, sourceNode.metadata?.prompt || node.metadata?.prompt || ""), projectId);
             const prompt = (isPanorama ? savedImageMetadata?.panoramaFinalPrompt || "" : savedImageMetadata?.prompt || context?.prompt || "").trim();
             const requestPrompt = isPanorama ? prompt : applyCameraPrompt(prompt, savedImageMetadata?.cameraControl || node.metadata?.cameraControl);
             if (!prompt) {
@@ -4450,7 +4456,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
             const generationType = savedImageMetadata?.generationType;
             const useReferenceImages = generationType ? generationType === "edit" : Boolean(context?.referenceImages.length);
             const retryReferenceImages =
-                hasSavedImageMetadata && savedImageMetadata ? await resolveMetadataReferences(savedImageMetadata) : useReferenceImages ? (context?.referenceImages.length ? context.referenceImages : sourceNodeReferenceImages(batchRoot || sourceNode)) : [];
+                hasSavedImageMetadata && savedImageMetadata ? await resolveMetadataReferences(savedImageMetadata, projectId) : useReferenceImages ? (context?.referenceImages.length ? context.referenceImages : sourceNodeReferenceImages(batchRoot || sourceNode, projectId)) : [];
             if (useReferenceImages && !retryReferenceImages) {
                 message.error("参考图片已丢失，无法继续重试");
                 setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails: "参考图片已丢失，无法继续重试" } } : item)));
@@ -4803,7 +4809,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
             return { ok: !failed, pending: outputs.some((item) => item.metadata?.status === "loading"), nodeId: node.id, createdNodeIds: outputs.map((item) => item.id), message: failed?.metadata?.errorDetails };
         }
         const normalized = normalizeCanvasAgentAction(action, args, command.task_id);
-        const result = (desktopRuntime ? await executeCanonicalAgentEdit(normalized) : null) || await executeCanvasAgentAction(normalized, []);
+        const result = (desktopRuntime ? await executeCanonicalAgentEdit(normalized) : null) || await executeCanvasAgentAction(normalized, [], useCanvasStore.getState().openProject(projectId)?.operationState.revision);
         return { ...result, pending: result.ok && result.status === "loading" };
     }, [desktopRuntime, executeCanonicalAgentEdit, effectiveConfig, executeCanvasAgentAction, executeMaskEditImageNode, executeGenerateAngleNode, executeRetryNode, flushCanvasForAgent, getCanvasCenter, executeGenerateNode, isAiConfigReady, projectId, redoCanvas, executeSaveNodeAsset, undoCanvas, uploadImage, uploadMediaFile]);
 
@@ -6385,13 +6391,14 @@ function generationReferenceUrls(context: {
     ].filter((url): url is string => Boolean(url));
 }
 
-async function resolveMetadataReferences(metadata: CanvasNodeMetadata) {
+async function resolveMetadataReferences(metadata: CanvasNodeMetadata, projectId: string) {
     if (metadata.generationType !== "edit") return [];
     if (!metadata.references?.length) return null;
     const references = await Promise.all(
         metadata.references.map(async (url, index) => {
-            const dataUrl = url.startsWith("image:") ? await imageToDataUrl({ storageKey: url }) : url;
-            return dataUrl ? { id: `${index}`, name: `reference-${index}.png`, type: "image/png", dataUrl, storageKey: url.startsWith("image:") ? url : undefined } : null;
+            const storageKey = /^(image:|local-ref:|server:)/.test(url) ? url : undefined;
+            const dataUrl = await imageToDataUrl({ storageKey, dataUrl: url, projectId });
+            return dataUrl ? { id: `${index}`, name: `reference-${index}.png`, type: "image/png", dataUrl, storageKey, projectId } : null;
         }),
     );
     return references.every(Boolean) ? (references as ReferenceImage[]) : null;
@@ -6854,7 +6861,7 @@ function findRetrySourceNode(nodeId: string, nodes: CanvasNodeData[], connection
     return null;
 }
 
-function sourceNodeReferenceImages(node: CanvasNodeData | null) {
+function sourceNodeReferenceImages(node: CanvasNodeData | null, projectId: string) {
     if (!node || !isCanvasImageNodeType(node.type) || !node.metadata?.content) return [];
     return [
         {
@@ -6863,6 +6870,7 @@ function sourceNodeReferenceImages(node: CanvasNodeData | null) {
             type: node.metadata.mimeType || "image/png",
             dataUrl: node.metadata.content,
             storageKey: node.metadata.storageKey,
+            projectId,
         },
     ];
 }

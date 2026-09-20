@@ -9,8 +9,8 @@ const ts=requireWeb('typescript');
 const source=readFileSync(new URL('../../web/src/components/layout/canvas-command-dispatcher.tsx',import.meta.url),'utf8');
 const js=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
 const tick=()=>new Promise(resolve=>setTimeout(resolve,5));
-async function harness(action,status='queued',saveState='saved') {
- const task={task_id:'fixture-request',project_id:'fixture-project',status,request:{action,base_revision:'latest',arguments:{draftToken:'draft:1'}}};
+async function harness(action,status='queued',saveState='saved',baseRevision='latest') {
+ const task={task_id:'fixture-request',project_id:'fixture-project',status,request:{action,base_revision:baseRevision,arguments:{draftToken:'draft:1'}}};
  const calls=[];let poll;let cleanup;let executing=0;
  const store={hydrated:true,saveStatus:{'fixture-project':{state:saveState}},projects:[{id:'fixture-project',__desktopRevision:'latest'}],
   inspectSaveConflict:async id=>{calls.push(['inspect',id]);return {draftToken:'draft:1'}},resolveSaveConflict:async(...args)=>{calls.push(['resolve',...args]);return {projectId:args[0]}}};
@@ -48,4 +48,9 @@ for(const name of ['generate_video','delete_node'])test(`assistant ${name} keeps
   onExecuteAction:async()=>{executions++;return {ok:true}},onAgentActionResult:()=>{reports++},requestConfirmation:async()=>{confirmations++;return true}};
  vm.runInNewContext(actionCode,context);const result=await context.exports.run({name,arguments:{nodeId:'fixture'}});
  assert.equal(result.ok,true);assert.equal(executions,1);assert.equal(reports,1);assert.equal(confirmations,name==='delete_node'?1:0);
+});
+
+test('stale durable command is rejected before any generation executor call',async()=>{
+ const h=await harness('generate_video','queued','saved','old-document');
+ assert.equal(h.task.status,'failed');assert.equal(h.task.result.code,'REVISION_CONFLICT');assert.equal(h.executions(),0);h.close();
 });

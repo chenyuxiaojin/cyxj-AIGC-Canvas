@@ -315,7 +315,13 @@ export async function setImageBlob(storageKey: string, blob: Blob, retainDisplay
     return url;
 }
 
-export async function imageToDataUrl(image: { url?: string; dataUrl?: string; storageKey?: string }) {
+export async function imageToDataUrl(image: { url?: string; dataUrl?: string; storageKey?: string; projectId?: string; type?: string }) {
+    const localKey = [image.storageKey, image.dataUrl, image.url].find((value) => value?.startsWith("local-ref:"));
+    if (localKey) {
+        if (image.dataUrl?.startsWith("data:image/")) return image.dataUrl;
+        const { readCanvasMediaBlob } = await import("@/services/canvas-media");
+        return blobToDataUrl(await readCanvasMediaBlob(image.projectId || "", localKey, image.type || "image/png"));
+    }
     // Agent/export-style reads consume original bytes, not a display URL whose
     // lifetime is owned by a mounted preview.
     if (image.storageKey) {

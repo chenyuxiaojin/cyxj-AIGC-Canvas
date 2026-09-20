@@ -281,7 +281,7 @@ async function buildMiMoNativeRequest(config: AiConfig, model: string, prompt: s
 
 async function referenceAudioDataUrl(referenceAudio?: ReferenceAudio) {
     if (!referenceAudio) throw new Error("请连接并选择参考音频节点");
-    const blob = await readMediaOriginal(referenceAudio.storageKey, referenceAudio.url);
+    const blob = await readMediaOriginal(referenceAudio.storageKey, referenceAudio.url, referenceAudio.projectId, referenceAudio.type);
     const mimeType = normalizeCloneMimeType(blob.type) || normalizeCloneMimeType(referenceAudio.type);
     if (!mimeType) throw new Error("参考音频仅支持 MP3 或 WAV");
     const base64 = await blobToBase64(blob);

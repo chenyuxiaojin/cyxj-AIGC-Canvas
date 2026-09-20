@@ -217,13 +217,17 @@ export function buildNodeChatMessages(context: NodeGenerationContext): ChatCompl
     ];
 }
 
-export async function hydrateNodeGenerationContext(context: NodeGenerationContext) {
+export async function hydrateNodeGenerationContext(context: NodeGenerationContext, projectId?: string): Promise<NodeGenerationContext> {
     const { imageToDataUrl } = await import("@/services/image-storage");
+    const imageData = async (image: ReferenceImage) => ({ ...image, projectId, dataUrl: await imageToDataUrl({ ...image, projectId }) });
     return {
         ...context,
-        referenceImages: await Promise.all(context.referenceImages.map(async (image) => ({ ...image, dataUrl: await imageToDataUrl(image) }))),
-        firstFrame: context.firstFrame ? { ...context.firstFrame, dataUrl: await imageToDataUrl(context.firstFrame) } : null,
-        lastFrame: context.lastFrame ? { ...context.lastFrame, dataUrl: await imageToDataUrl(context.lastFrame) } : null,
+        referenceVideos: context.referenceVideos.map((media) => ({ ...media, projectId })),
+        referenceAudios: context.referenceAudios.map((media) => ({ ...media, projectId })),
+        videoElementList: context.videoElementList.map((item) => ({ ...item, references: item.references.map((reference) => ({ ...reference, projectId })) })),
+        referenceImages: await Promise.all(context.referenceImages.map(imageData)),
+        firstFrame: context.firstFrame ? await imageData(context.firstFrame) : null,
+        lastFrame: context.lastFrame ? await imageData(context.lastFrame) : null,
     };
 }
 

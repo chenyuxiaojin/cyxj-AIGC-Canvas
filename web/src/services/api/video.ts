@@ -600,12 +600,12 @@ async function elementReferenceToInputUrl(reference: VideoElementReference) {
             const publicUrl = publicHttpUrl(url);
             if (publicUrl) return publicUrl;
         }
-        if (reference.dataUrl) return reference.dataUrl;
-        return imageToDataUrl({ dataUrl: reference.dataUrl || reference.url || resolvedUrl, storageKey: reference.storageKey });
+        return imageToDataUrl(reference);
     }
     const resolvedUrl = await mediaPublicUrl(reference.storageKey, reference.url || "");
     const publicUrl = publicHttpUrl(resolvedUrl) || publicHttpUrl(reference.url);
     if (publicUrl) return publicUrl;
+    if ([reference.storageKey, reference.url].some((url) => url?.startsWith("local-ref:"))) throw new VideoRequestError("此模型的音视频主体参考需要公网访问地址");
     // The owning workbench keeps the existing reference URL alive during the
     // request. Do not invent a different provider payload format here.
     return resolvedUrl || reference.url || "";
@@ -637,7 +637,7 @@ async function imageReferenceToFormValue(image: ReferenceImage) {
 }
 
 async function mediaReferenceToFile(media: ReferenceVideo | ReferenceAudio) {
-    const blob = await readMediaOriginal(media.storageKey, media.url);
+    const blob = await readMediaOriginal(media.storageKey, media.url, media.projectId, media.type);
     return new File([blob], media.name || "reference", { type: media.type || blob.type || "application/octet-stream" });
 }
 
