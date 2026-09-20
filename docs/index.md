@@ -21,6 +21,7 @@
 - [后端数据库说明](backend/backend-database.md)
 - [画布数据结构](backend/canvas-data-structure.md)
 - [本机 Agent 适配层与 CLI](development/local-agent-adapter.md)
+- [AIGC Agent 续作交接：正式入口、当前版本与旧失败任务](development/canvas-generation-handoff.md)
 - [本机 Agent 适配层总装交接](development/local-agent-adapter-handoff.md)
 
 ## 商务合作

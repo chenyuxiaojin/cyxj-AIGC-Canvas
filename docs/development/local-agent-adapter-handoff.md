@@ -1,5 +1,7 @@
 # 本机 Agent 适配层总装交接
 
+本文保留早期分支总装记录，不代表当前安装或主线状态。当前 AIGC 续作请先读 [续作交接](canvas-generation-handoff.md)，开发与验收以 [产品需求](../overview/product-requirements.md) 和最新主线为准；不要照下面的历史分支步骤重新总装。
+
 ## 分支与基线
 
 - 专属分支：`feat/local-agent-adapter`
