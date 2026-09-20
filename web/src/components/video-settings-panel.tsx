@@ -7,7 +7,7 @@ import { ImageSettingsTheme } from "@/components/image-settings-panel";
 import { boolConfig, isSeedanceFastOrMiniModel, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceResolution, seedanceDurationOptionsForModel, seedanceMaxDuration, seedancePixelLabel, seedanceRatioOptions, seedanceResolutionOptions } from "@/lib/seedance-video";
 import { isSeedanceMediaConfig, seedanceMediaDuration, seedanceMediaDurations } from "@/lib/seedance-media";
 import { type CanvasTheme } from "@/lib/canvas-theme";
-import { COGVIDEOX3_DURATIONS, isCogVideoX3Model, modelKey, normalizeCogVideoX3Duration, supportsVideoAudioGeneration } from "@/lib/video-model-capabilities";
+import { COGVIDEOX3_DURATIONS, isCogVideoX3Model, modelKey, normalizeCogVideoX3Duration, omniFlashVideoPreset, supportsVideoAudioGeneration } from "@/lib/video-model-capabilities";
 import { channelIdForActiveModel, localChannelForActiveModel, channelProtocolForConfig, type AiConfig } from "@/stores/use-config-store";
 
 export const videoResolutionOptions = [
@@ -59,6 +59,19 @@ type VideoSettingsPanelProps = {
 };
 
 export function VideoSettingsPanel({ config, modelName, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5", hideNegativePrompt = false, visualOnly = false }: VideoSettingsPanelProps) {
+    const omniFlash = omniFlashVideoPreset(modelName || config.model || config.videoModel);
+    if (omniFlash) {
+        return (
+            <div className={className} style={{ color: theme.node.text }} onMouseDown={(event) => event.stopPropagation()}>
+                {showTitle ? <div className="text-lg font-semibold">视频设置</div> : null}
+                <SettingGroup title="画面比例" color={theme.node.muted}>
+                    <div>{omniFlash.ratio === "16:9" ? "横屏" : "竖屏"} · {omniFlash.ratio}</div>
+                </SettingGroup>
+                {!visualOnly ? <SettingGroup title="时长" color={theme.node.muted}><div>{omniFlash.seconds} 秒</div></SettingGroup> : null}
+                <div className="text-xs" style={{ color: theme.node.muted }}>时长和画面比例由型号决定，切换视频型号即可更改。</div>
+            </div>
+        );
+    }
     if (isAPIMartKlingV26Config(config, modelName || config.model || config.videoModel) || isAPIMartKlingV3Config(config, modelName || config.model || config.videoModel) || isKIEKlingV3Config(config, modelName || config.model || config.videoModel)) {
         return <KlingV26VideoSettingsPanel config={config} modelName={modelName} onConfigChange={onConfigChange} theme={theme} showTitle={showTitle} className={className} hideNegativePrompt={hideNegativePrompt} visualOnly={visualOnly} />;
     }

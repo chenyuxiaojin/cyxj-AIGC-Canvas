@@ -243,6 +243,7 @@ function isVideoModelName(model: string) {
         value.includes("vidu") ||
         value.includes("pixverse") ||
         value.includes("omni-flash") ||
+        value.includes("omni_flash") ||
         value.includes("gemini-omni-video") ||
         value.includes("veo3.1") ||
         value.includes("veo-3.1") ||

@@ -2,6 +2,12 @@ export function modelKey(modelName: string) {
     return modelName.trim().toLowerCase().replace(/[._/]+/g, "-");
 }
 
+export function omniFlashVideoPreset(modelName: string) {
+    const match = modelKey(modelName).match(/^omni-flash-(landscape|portrait)-(4|6|10)s$/);
+    if (!match) return null;
+    return { seconds: Number(match[2]), ratio: match[1] === "portrait" ? "9:16" : "16:9" };
+}
+
 export function isCogVideoX3Model(modelName: string) {
     return modelKey(modelName) === "cogvideox-3";
 }

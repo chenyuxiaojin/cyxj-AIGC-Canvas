@@ -46,6 +46,7 @@ async fn blocking(
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(|| async { "ok" }))
+        .route("/api/ai/guoguo/*path", get(guoguo_request).post(guoguo_request).layer(DefaultBodyLimit::max(100 * 1024 * 1024)))
         .route("/api/ai/laogou/*path", get(laogou_request).post(laogou_request).layer(DefaultBodyLimit::max(100 * 1024 * 1024)))
         .route(
             "/api/ai/direct-request",
@@ -80,6 +81,9 @@ pub fn router(state: AppState) -> Router {
 }
 async fn laogou_request(Path(path): Path<String>, method: Method, headers: HeaderMap, body: Bytes) -> Response {
     crate::laogou::forward(method, path, headers, body).await
+}
+async fn guoguo_request(Path(path): Path<String>, method: Method, headers: HeaderMap, body: Bytes) -> Response {
+    crate::guoguo::forward(method, path, headers, body).await
 }
 async fn direct_request(body: Bytes) -> Response {
     let result = if body.is_empty() {

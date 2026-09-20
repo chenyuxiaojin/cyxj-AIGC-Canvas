@@ -10,7 +10,7 @@ import { parseOpenAIChatVideoResponse } from "@/lib/openai-chat-video";
 import { localVideoGatewayUrl } from "@/lib/local-video-gateway";
 import { isSeedanceMediaConfig, seedanceMediaDuration } from "@/lib/seedance-media";
 import { isKIEGrokVideoModel, isKIEKlingV3Config, kieKlingOmniVariant } from "@/components/video-settings-panel";
-import { isAgnesVideoV25Model, isCogVideoX3Model, modelKey, normalizeCogVideoX3Duration, supportsVideoAudioGeneration } from "@/lib/video-model-capabilities";
+import { isAgnesVideoV25Model, isCogVideoX3Model, modelKey, normalizeCogVideoX3Duration, omniFlashVideoPreset, supportsVideoAudioGeneration } from "@/lib/video-model-capabilities";
 import { readMediaOriginal, uploadMediaFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
 import { buildApiUrl, channelIdForActiveModel, channelProtocolForConfig, directAIProviderForConfig, localChannelForActiveModel, type AiConfig, type VideoElementReference } from "@/stores/use-config-store";
@@ -178,6 +178,7 @@ async function createMediaVideoTask(config: AiConfig, prompt: string, input: Req
 async function createChatVideoTask(config: AiConfig, prompt: string, input: Required<VideoReferenceInput>, options: VideoTaskCreateOptions): Promise<CreatedVideoGenerationTask> {
     if (input.videoReferences.length || input.audioReferences.length || input.firstFrame || input.lastFrame) throw new VideoRequestError("OpenAI 对话视频接口当前使用文字和普通参考图，请将图片放入参考图区域");
     const model = config.model || config.videoModel;
+    const omniFlash = omniFlashVideoPreset(model);
     const startedAt = Date.now();
     const url = aiApiUrl(config, "/chat/completions");
     const images = await Promise.all(input.references.map(imageToDataUrl));
@@ -185,14 +186,13 @@ async function createChatVideoTask(config: AiConfig, prompt: string, input: Requ
     const body = {
         model, stream: false,
         messages: [{ role: "user", content: [{ type: "text", text: prompt }, ...images.map((url) => ({ type: "image_url", image_url: { url } }))] }],
-        duration: isSeedanceVideoConfig(config) ? normalizeSeedanceDuration(config.videoSeconds, model) : Number(normalizeVideoSeconds(config.videoSeconds)),
-        aspect_ratio: normalizeSeedanceRatio(config.size),
-        resolution: normalizeSeedanceResolution(config.vquality, model),
-        generate_audio: boolConfig(config.videoGenerateAudio, true),
+        duration: omniFlash?.seconds ?? (isSeedanceVideoConfig(config) ? normalizeSeedanceDuration(config.videoSeconds, model) : Number(normalizeVideoSeconds(config.videoSeconds))),
+        aspect_ratio: omniFlash?.ratio ?? normalizeSeedanceRatio(config.size),
+        ...(!omniFlash ? { resolution: normalizeSeedanceResolution(config.vquality, model), generate_audio: boolConfig(config.videoGenerateAudio, true) } : {}),
     };
     try {
         const response = await axios.post(url, body, { headers: aiHeaders(config), timeout: 900000 });
-        const task = { ...parseOpenAIChatVideoResponse(response.data, options.clientTaskId || `video_${crypto.randomUUID()}`), model, size: seedancePixelLabel(body.resolution, body.aspect_ratio) || config.size, seconds: String(body.duration) };
+        const task = { ...parseOpenAIChatVideoResponse(response.data, options.clientTaskId || `video_${crypto.randomUUID()}`), model, size: seedancePixelLabel(body.resolution || "720p", body.aspect_ratio) || config.size, seconds: String(body.duration) };
         return { task, pollId: task.id, startedAt, requestBody: body };
     } catch (error) {
         const detail = axios.isAxiosError(error) ? { endpoint: url, status: error.response?.status, requestId: error.response?.headers?.["x-request-id"], response: error.response?.data } : { endpoint: url };

@@ -3,6 +3,7 @@ mod apimart_refs;
 mod assets;
 mod db;
 mod direct;
+mod guoguo;
 mod kie;
 mod kie_advanced;
 mod laogou;
