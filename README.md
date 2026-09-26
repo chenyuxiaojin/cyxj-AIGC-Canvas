@@ -40,3 +40,7 @@ PATH="$HOME/.cargo/bin:$PATH" bun run dev
 - [数据与历史优化](docs/progress/canvas-data-optimization.md) · [画布与素材优化](docs/progress/canvas-ui-optimization.md)
 - [本机 Agent 接入证据](docs/progress/canvas-local-agent-integration.md)
 - [上游说明存档](docs/overview/upstream-readme-reference.md)（含上游原作者、服务与部署信息，不作为本分支运行指南）
+
+## 许可范围
+
+程序继续沿用上游 MIT，保留原作者。内置 Skill、Node.js、模型和用户素材的独立许可见 [NOTICE.md](NOTICE.md)。
